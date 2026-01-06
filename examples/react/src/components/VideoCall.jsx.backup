@@ -1,0 +1,671 @@
+import { useState, useEffect, useRef } from 'react';
+import * as mediasoupClient from 'mediasoup-client';
+import { logger } from '../utils/logger';
+
+export function VideoCall({ client, user, onLogout }) {
+  const [roomId, setRoomId] = useState('test-room');
+  const [isInRoom, setIsInRoom] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+  const [videos, setVideos] = useState([]);
+
+  const deviceRef = useRef(null);
+  const sendTransportRef = useRef(null);
+  const recvTransportRef = useRef(null);
+  const producersRef = useRef(new Map());
+  const consumersRef = useRef(new Map());
+  const localStreamRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+  }, []);
+
+  const setupMediasoup = async () => {
+    logger.info('🔧 [VideoCall] Setting up mediasoup device and transports');
+
+    // Create mediasoup device
+    const device = new mediasoupClient.Device();
+    deviceRef.current = device;
+    logger.info('✓ [VideoCall] Mediasoup device created');
+
+    // Get router capabilities (pass roomId since we just joined)
+    logger.info(`📡 [VideoCall] Getting router capabilities for room: ${roomId}`);
+    const routerCaps = await client.sfu.getRouterCapabilities(roomId);
+    logger.info('✓ [VideoCall] Router capabilities received');
+
+    // Load device
+    logger.info('⚙️ [VideoCall] Loading device with router RTP capabilities');
+    await device.load({ routerRtpCapabilities: routerCaps.rtpCapabilities });
+    logger.info('✓ [VideoCall] Device loaded');
+
+    // Set RTP capabilities
+    logger.info('📤 [VideoCall] Sending device RTP capabilities to server');
+    await client.sfu.setRtpCapabilities(device.rtpCapabilities);
+    logger.info('✓ [VideoCall] RTP capabilities set');
+
+    // Create send transport
+    logger.info('🚚 [VideoCall] Creating send transport');
+    const sendTransportData = await client.sfu.createTransport('send');
+    const sendTransport = device.createSendTransport(sendTransportData);
+    sendTransportRef.current = sendTransport;
+    logger.info(`✓ [VideoCall] Send transport created: ${sendTransportData.id}`);
+
+    sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+      try {
+        logger.info('🔗 [VideoCall] Connecting send transport');
+        await client.sfu.connectTransport(sendTransportData.id, dtlsParameters);
+        logger.info('✓ [VideoCall] Send transport connected');
+        callback();
+      } catch (err) {
+        logger.error('❌ [VideoCall] Send transport connect failed:', err);
+        errback(err);
+      }
+    });
+
+    sendTransport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
+      try {
+        logger.info(`🎬 [VideoCall] Producing ${kind} track`);
+        const { producerId } = await client.sfu.createProducer(
+          sendTransportData.id,
+          kind,
+          rtpParameters,
+          appData
+        );
+        logger.info(`✓ [VideoCall] ${kind} producer created: ${producerId}`);
+        callback({ id: producerId });
+      } catch (err) {
+        logger.error(`❌ [VideoCall] Failed to produce ${kind}:`, err);
+        errback(err);
+      }
+    });
+
+    // Create receive transport
+    logger.info('🚚 [VideoCall] Creating receive transport');
+    const recvTransportData = await client.sfu.createTransport('recv');
+    const recvTransport = device.createRecvTransport(recvTransportData);
+    recvTransportRef.current = recvTransport;
+    logger.info(`✓ [VideoCall] Receive transport created: ${recvTransportData.id}`);
+
+    recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+      try {
+        logger.info('🔗 [VideoCall] Connecting receive transport');
+        await client.sfu.connectTransport(recvTransportData.id, dtlsParameters);
+        logger.info('✓ [VideoCall] Receive transport connected');
+        callback();
+      } catch (err) {
+        logger.error('❌ [VideoCall] Receive transport connect failed:', err);
+        errback(err);
+      }
+    });
+
+    logger.info('✓ [VideoCall] Mediasoup setup complete');
+  };
+
+  const getLocalMedia = async () => {
+    logger.info('🎥 [VideoCall] Requesting local media (video + audio)');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
+    });
+    logger.info(`✓ [VideoCall] Got local media stream with ${stream.getTracks().length} tracks`);
+
+    localStreamRef.current = stream;
+
+    // Add local video
+    setVideos((prev) => [...prev, { id: 'local', participantId: 'local', stream, label: 'You' }]);
+    logger.info('✓ [VideoCall] Local video added to UI');
+
+    // Create producers
+    logger.info('🎬 [VideoCall] Creating producers for local tracks');
+    for (const track of stream.getTracks()) {
+      logger.info(`📤 [VideoCall] Producing ${track.kind} track`);
+      const producer = await sendTransportRef.current.produce({ track });
+      producersRef.current.set(producer.id, producer);
+      logger.info(`✓ [VideoCall] ${track.kind} producer created: ${producer.id}`);
+
+      producer.on('trackended', () => {
+        logger.info(`🛑 [VideoCall] Track ended: ${producer.id}`);
+      });
+
+      producer.on('transportclose', () => {
+        logger.info(`🛑 [VideoCall] Transport closed for producer: ${producer.id}`);
+      });
+    }
+    logger.info(`✓ [VideoCall] All producers created (${producersRef.current.size} total)`);
+  };
+
+  const setupSFUEventHandlers = () => {
+    logger.info('🎯 [VideoCall] Setting up SFU event handlers');
+
+    client.sfu.on('participant-joined', (data) => {
+      logger.info('👋 [VideoCall] Participant joined:', data);
+    });
+
+    client.sfu.on('participant-left', (data) => {
+      logger.info('👋 [VideoCall] Participant left:', data);
+      setVideos((prev) => prev.filter((v) => v.participantId !== data.participantId));
+      logger.info(`✓ [VideoCall] Removed video for participant ${data.participantId}`);
+    });
+
+    client.sfu.on('new-producer', async (data) => {
+      logger.info('🎬 [VideoCall] New producer detected:', {
+        participantId: data.participantId,
+        producerId: data.producerId,
+        kind: data.kind,
+        type: data.type
+      });
+      try {
+        await consumeTrack(data.participantId, data.producerId);
+        logger.info(`✓ [VideoCall] Successfully consumed ${data.kind} track from ${data.participantId}`);
+      } catch (err) {
+        logger.error(`❌ [VideoCall] Failed to consume track:`, err);
+      }
+    });
+
+    client.sfu.on('producer-closed', (data) => {
+      logger.info('🛑 [VideoCall] Producer closed:', data);
+      const consumer = consumersRef.current.get(data.producerId);
+      if (consumer) {
+        // Remove track from participant's stream
+        setVideos((prev) => {
+          return prev.map((video) => {
+            // Find the video element that contains this track
+            const tracks = video.stream.getTracks();
+            const trackToRemove = tracks.find((t) => t.id === consumer.track.id);
+            if (trackToRemove) {
+              logger.info(`🗑️ [VideoCall] Removing ${consumer.track.kind} track from ${video.participantId}'s stream`);
+              video.stream.removeTrack(trackToRemove);
+            }
+            return video;
+          });
+        });
+
+        consumer.close();
+        consumersRef.current.delete(data.producerId);
+        logger.info(`✓ [VideoCall] Cleaned up consumer for producer ${data.producerId}`);
+      }
+    });
+
+    logger.info('✓ [VideoCall] SFU event handlers registered');
+  };
+
+  const consumeTrack = async (participantId, producerId) => {
+    logger.info(`🍿 [VideoCall] Starting to consume track from participant ${participantId}, producer ${producerId}`);
+    try {
+      // Check if receive transport exists
+      if (!recvTransportRef.current) {
+        throw new Error('Receive transport not available');
+      }
+      logger.info(`✓ [VideoCall] Receive transport available: ${recvTransportRef.current.id}`);
+
+      // Request consumer from server
+      logger.info(`📤 [VideoCall] Requesting consumer for producer ${producerId}`);
+      const { consumerId, rtpParameters, kind } = await client.sfu.createConsumer(
+        participantId,
+        producerId
+      );
+      logger.info(`✓ [VideoCall] Consumer created on server: ${consumerId} (kind: ${kind})`);
+
+      // Create local consumer
+      logger.info(`🔧 [VideoCall] Creating local mediasoup consumer`);
+      const consumer = await recvTransportRef.current.consume({
+        id: consumerId,
+        producerId,
+        kind,
+        rtpParameters,
+      });
+      logger.info(`✓ [VideoCall] Local consumer created: ${consumer.id}`);
+
+      consumersRef.current.set(producerId, consumer);
+      logger.info(`📝 [VideoCall] Consumer stored (total: ${consumersRef.current.size})`);
+
+      // Add track to participant's stream or create new stream
+      setVideos((prev) => {
+        // Find existing video for this participant
+        const existingVideoIndex = prev.findIndex((v) => v.participantId === participantId);
+
+        if (existingVideoIndex !== -1) {
+          // Participant already has a video element, add this track to their stream
+          logger.info(`📺 [VideoCall] Adding ${kind} track to existing stream for ${participantId}`);
+          const existingVideo = prev[existingVideoIndex];
+          existingVideo.stream.addTrack(consumer.track);
+          logger.info(`✓ [VideoCall] Track added to existing stream (total tracks: ${existingVideo.stream.getTracks().length})`);
+          return [...prev]; // Trigger re-render
+        } else {
+          // First track from this participant, create new video element
+          logger.info(`🎬 [VideoCall] Creating new MediaStream for ${kind} track from ${participantId}`);
+          const stream = new MediaStream([consumer.track]);
+          const newVideos = [
+            ...prev,
+            {
+              id: `${participantId}-video`,
+              participantId,
+              stream,
+              label: `Participant ${participantId.substring(0, 8)}`
+            },
+          ];
+          logger.info(`✓ [VideoCall] Added new video element for ${participantId} (total videos: ${newVideos.length})`);
+          return newVideos;
+        }
+      });
+
+      logger.info(`✅ [VideoCall] Successfully consumed and displayed ${kind} track from ${participantId}`);
+    } catch (err) {
+      logger.error(`❌ [VideoCall] Failed to consume track from ${participantId}:`, err);
+      throw err;
+    }
+  };
+
+  const handleJoinRoom = async () => {
+    logger.info('═══════════════════════════════════════════════════');
+    logger.info('🚀 [VideoCall] JOIN ROOM SEQUENCE STARTED');
+    logger.info('═══════════════════════════════════════════════════');
+
+    try {
+      setError(null);
+
+      logger.info('📊 [VideoCall] Pre-flight check - Client state:', {
+        isConnected: client.isConnected,
+        hasSocket: !!client.socket,
+        socketConnected: client.socket?.connected,
+        hasSfu: !!client.sfu,
+        user: user,
+        roomId: roomId
+      });
+
+      // Ensure client socket is connected
+      if (!client.isConnected || !client.socket || !client.socket.connected) {
+        logger.error('❌ [VideoCall] Client not connected properly:', {
+          isConnected: client.isConnected,
+          hasSocket: !!client.socket,
+          socketConnected: client.socket?.connected,
+        });
+        throw new Error('Not connected to server. Please try logging out and back in.');
+      }
+      logger.info('✓ [VideoCall] Client socket connected');
+
+      // Ensure SFU manager is initialized
+      if (!client.sfu) {
+        logger.error('❌ [VideoCall] SFU manager not initialized');
+        throw new Error('SFU not initialized. Please try logging out and back in.');
+      }
+      logger.info('✓ [VideoCall] SFU manager initialized');
+
+      // Create room first (via REST API)
+      logger.info(`🏠 [VideoCall] Step 1: Creating/verifying room "${roomId}"`);
+      try {
+        const response = await fetch(`http://localhost:4000/rooms`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${client.auth.getToken()}`
+          },
+          body: JSON.stringify({ roomId })
+        });
+
+        if (!response.ok && response.status !== 409) {
+          const data = await response.json();
+          throw new Error(data.error || 'Failed to create room');
+        }
+        logger.info(`✓ [VideoCall] Room "${roomId}" ready (status: ${response.status})`);
+      } catch (err) {
+        logger.error('❌ [VideoCall] Room creation error:', err);
+      }
+
+      // Connect to SFU
+      logger.info('🔌 [VideoCall] Step 2: Connecting to SFU');
+      await client.sfu.connect();
+      logger.info('✓ [VideoCall] SFU connection established');
+
+      // Join room
+      logger.info(`🚪 [VideoCall] Step 3: Joining room "${roomId}" as user ${user.id}`);
+      const joinResponse = await client.sfu.joinRoom(roomId, user.id);
+      logger.info('✓ [VideoCall] Room joined successfully');
+      logger.info(`👥 [VideoCall] Existing participants in room: ${joinResponse.participants?.length || 0}`);
+      if (joinResponse.participants && joinResponse.participants.length > 0) {
+        joinResponse.participants.forEach((p, i) => {
+          logger.info(`   ${i + 1}. Participant ${p.id} with ${p.producers?.length || 0} producers`);
+        });
+      }
+
+      // Setup mediasoup
+      logger.info('⚙️ [VideoCall] Step 4: Setting up mediasoup');
+      await setupMediasoup();
+      logger.info('✓ [VideoCall] Mediasoup setup complete');
+
+      // Get local media
+      logger.info('🎥 [VideoCall] Step 5: Getting local media');
+      await getLocalMedia();
+      logger.info('✓ [VideoCall] Local media setup complete');
+
+      // Setup event handlers
+      logger.info('🎯 [VideoCall] Step 6: Setting up event handlers');
+      setupSFUEventHandlers();
+      logger.info('✓ [VideoCall] Event handlers ready');
+
+      // Consume existing producers from participants who were already in the room
+      if (joinResponse.participants && joinResponse.participants.length > 0) {
+        logger.info('🍿 [VideoCall] Step 7: Consuming existing producers from participants already in room');
+        logger.info('🔍 [VideoCall] Debug - user.id:', user.id);
+        logger.info('🔍 [VideoCall] Debug - All participant IDs:', joinResponse.participants.map(p => p.id));
+
+        // Filter out our own participant ID - don't consume our own producers!
+        const otherParticipants = joinResponse.participants.filter(p => {
+          const isNotSelf = p.id !== user.id;
+          logger.info(`🔍 [VideoCall] Comparing: p.id="${p.id}" vs user.id="${user.id}" -> isNotSelf=${isNotSelf}`);
+          return isNotSelf;
+        });
+        logger.info(`👥 [VideoCall] Found ${otherParticipants.length} other participants (filtered out self: ${user.id})`);
+        logger.info(`👥 [VideoCall] Other participant IDs:`, otherParticipants.map(p => p.id));
+
+        for (const participant of otherParticipants) {
+          logger.info(`👤 [VideoCall] Processing participant ${participant.id} with ${participant.producers?.length || 0} producers`);
+          if (participant.producers && participant.producers.length > 0) {
+            for (const producer of participant.producers) {
+              logger.info(`📺 [VideoCall] Consuming existing ${producer.kind} producer ${producer.id} from ${participant.id}`);
+              try {
+                await consumeTrack(participant.id, producer.id);
+                logger.info(`✅ [VideoCall] Successfully consumed existing ${producer.kind} from ${participant.id}`);
+              } catch (err) {
+                logger.error(`❌ [VideoCall] Failed to consume existing producer ${producer.id}:`, err);
+              }
+            }
+          }
+        }
+        logger.info('✓ [VideoCall] Finished consuming existing producers');
+      } else {
+        logger.info('ℹ️ [VideoCall] Step 7: No existing participants in room, skipping consume step');
+      }
+
+      setIsInRoom(true);
+      setSuccess(`Joined room: ${roomId}`);
+      setTimeout(() => setSuccess(null), 3000);
+
+      logger.info('═══════════════════════════════════════════════════');
+      logger.info('✅ [VideoCall] JOIN ROOM SEQUENCE COMPLETE');
+      logger.info('═══════════════════════════════════════════════════');
+    } catch (err) {
+      logger.info('═══════════════════════════════════════════════════');
+      logger.error('❌ [VideoCall] JOIN ROOM SEQUENCE FAILED:', err);
+      logger.info('═══════════════════════════════════════════════════');
+      setError(err.message);
+    }
+  };
+
+  const handleLeaveRoom = async () => {
+    try {
+      cleanup();
+      await client.sfu.leaveRoom();
+      client.sfu.disconnect();
+
+      setIsInRoom(false);
+      setVideos([]);
+      setSuccess('Left room');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      logger.error('Failed to leave room:', err);
+      setError(err.message);
+    }
+  };
+
+  const cleanup = () => {
+    // Stop local media
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null;
+    }
+
+    // Close producers
+    for (const producer of producersRef.current.values()) {
+      producer.close();
+    }
+    producersRef.current.clear();
+
+    // Close consumers
+    for (const consumer of consumersRef.current.values()) {
+      consumer.close();
+    }
+    consumersRef.current.clear();
+
+    // Close transports
+    if (sendTransportRef.current) {
+      sendTransportRef.current.close();
+      sendTransportRef.current = null;
+    }
+    if (recvTransportRef.current) {
+      recvTransportRef.current.close();
+      recvTransportRef.current = null;
+    }
+
+    deviceRef.current = null;
+  };
+
+  const toggleMute = async () => {
+    const audioProducer = Array.from(producersRef.current.values()).find(
+      (p) => p.kind === 'audio'
+    );
+    if (!audioProducer) return;
+
+    if (isMuted) {
+      await client.sfu.resumeProducer(audioProducer.id);
+      setIsMuted(false);
+    } else {
+      await client.sfu.pauseProducer(audioProducer.id);
+      setIsMuted(true);
+    }
+  };
+
+  const toggleVideo = async () => {
+    const videoProducer = Array.from(producersRef.current.values()).find(
+      (p) => p.kind === 'video'
+    );
+    if (!videoProducer) return;
+
+    if (isVideoOff) {
+      await client.sfu.resumeProducer(videoProducer.id);
+      setIsVideoOff(false);
+    } else {
+      await client.sfu.pauseProducer(videoProducer.id);
+      setIsVideoOff(true);
+    }
+  };
+
+  return (
+    <div style={styles.container}>
+      <div style={styles.header}>
+        <h3 style={styles.userEmail}>{user.email}</h3>
+        <button onClick={onLogout} style={{ ...styles.button, ...styles.buttonDanger }}>
+          Logout
+        </button>
+      </div>
+
+      <div style={styles.roomControls}>
+        <h3 style={styles.subtitle}>Room Controls</h3>
+        <div style={styles.roomInputGroup}>
+          <input
+            type="text"
+            value={roomId}
+            onChange={(e) => setRoomId(e.target.value)}
+            placeholder="Room ID"
+            style={styles.input}
+            disabled={isInRoom}
+          />
+          {!isInRoom ? (
+            <button onClick={handleJoinRoom} style={{ ...styles.button, ...styles.buttonPrimary }}>
+              Join Room
+            </button>
+          ) : (
+            <button onClick={handleLeaveRoom} style={{ ...styles.button, ...styles.buttonDanger }}>
+              Leave Room
+            </button>
+          )}
+        </div>
+        {error && <div style={styles.error}>{error}</div>}
+        {success && <div style={styles.success}>{success}</div>}
+      </div>
+
+      {videos.length > 0 && (
+        <div style={styles.videoContainer}>
+          {videos.map((video) => (
+            <VideoElement key={video.id} video={video} />
+          ))}
+        </div>
+      )}
+
+      {isInRoom && (
+        <div style={styles.callControls}>
+          <button onClick={toggleMute} style={{ ...styles.button, ...styles.buttonSecondary }}>
+            {isMuted ? 'Unmute' : 'Mute'}
+          </button>
+          <button onClick={toggleVideo} style={{ ...styles.button, ...styles.buttonSecondary }}>
+            {isVideoOff ? 'Start Video' : 'Stop Video'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VideoElement({ video }) {
+  const videoRef = useRef(null);
+
+  useEffect(() => {
+    if (videoRef.current && video.stream) {
+      videoRef.current.srcObject = video.stream;
+    }
+  }, [video.stream]);
+
+  return (
+    <div style={styles.videoWrapper}>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={video.id === 'local'}
+        style={styles.video}
+      />
+      <div style={styles.videoLabel}>{video.label}</div>
+    </div>
+  );
+}
+
+const styles = {
+  container: {
+    minHeight: '100vh',
+    background: '#f7fafc',
+  },
+  header: {
+    background: 'white',
+    padding: '15px 20px',
+    borderBottom: '1px solid #e0e0e0',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  userEmail: {
+    color: '#333',
+    fontSize: '18px',
+    margin: 0,
+  },
+  roomControls: {
+    padding: '20px',
+    background: '#fafafa',
+    borderBottom: '1px solid #e0e0e0',
+  },
+  subtitle: {
+    marginBottom: '15px',
+    color: '#333',
+    fontSize: '18px',
+  },
+  roomInputGroup: {
+    display: 'flex',
+    gap: '10px',
+    maxWidth: '600px',
+  },
+  input: {
+    flex: 1,
+    padding: '10px',
+    border: '2px solid #e0e0e0',
+    borderRadius: '6px',
+    fontSize: '14px',
+    outline: 'none',
+  },
+  button: {
+    padding: '10px 20px',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.3s',
+  },
+  buttonPrimary: {
+    background: '#667eea',
+    color: 'white',
+  },
+  buttonSecondary: {
+    background: '#f0f0f0',
+    color: '#333',
+  },
+  buttonDanger: {
+    background: '#e53e3e',
+    color: 'white',
+  },
+  error: {
+    background: '#fed7d7',
+    color: '#c53030',
+    padding: '12px',
+    borderRadius: '6px',
+    marginTop: '10px',
+    fontSize: '14px',
+  },
+  success: {
+    background: '#c6f6d5',
+    color: '#2f855a',
+    padding: '12px',
+    borderRadius: '6px',
+    marginTop: '10px',
+    fontSize: '14px',
+  },
+  videoContainer: {
+    padding: '20px',
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+    gap: '20px',
+  },
+  videoWrapper: {
+    position: 'relative',
+    background: '#000',
+    borderRadius: '8px',
+    overflow: 'hidden',
+    aspectRatio: '16 / 9',
+  },
+  video: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  videoLabel: {
+    position: 'absolute',
+    bottom: '10px',
+    left: '10px',
+    background: 'rgba(0, 0, 0, 0.7)',
+    color: 'white',
+    padding: '5px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+  },
+  callControls: {
+    padding: '20px',
+    textAlign: 'center',
+    borderTop: '1px solid #e0e0e0',
+    background: '#fafafa',
+    display: 'flex',
+    gap: '10px',
+    justifyContent: 'center',
+  },
+};

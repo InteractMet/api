@@ -1,0 +1,27 @@
+{
+  "name": "webvox-client",
+  "version": "1.0.0",
+  "description": "JavaScript client SDK for WebVox real-time communication platform",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node examples/vanilla/server.js"
+  },
+  "keywords": [
+    "webvox",
+    "webrtc",
+    "video-call",
+    "audio-call",
+    "sfu",
+    "real-time",
+    "communication"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
