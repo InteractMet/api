@@ -1,0 +1,77 @@
+name: Deploy React App to S3
+
+# Trigger workflow on push to main branch, but only if files in examples/react/ change
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'examples/react/**'
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+# Set environment variables for the entire workflow
+env:
+  NODE_VERSION: '18'
+  REACT_APP_PATH: 'examples/react'
+
+jobs:
+  deploy:
+    name: Build and Deploy to S3
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Node.js environment
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.REACT_APP_PATH }}/package-lock.json
+
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        working-directory: ${{ env.REACT_APP_PATH }}
+        run: npm ci
+
+      # Step 4: Build the React app
+      - name: Build React app
+        working-directory: ${{ env.REACT_APP_PATH }}
+        run: npm run build
+
+      # Step 5: Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 6: Sync build files to S3
+      - name: Deploy to S3
+        working-directory: ${{ env.REACT_APP_PATH }}
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.AWS_S3_BUCKET }} \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html" \
+            --exclude "*.html"
+
+      # Step 7: Upload HTML files with no-cache headers (for SPA routing)
+      - name: Upload HTML files with no-cache
+        working-directory: ${{ env.REACT_APP_PATH }}
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.AWS_S3_BUCKET }} \
+            --exclude "*" \
+            --include "*.html" \
+            --cache-control "public, max-age=0, must-revalidate"
+
+      # Step 8: Output deployment URL
+      - name: Deployment complete
+        run: |
+          echo "🚀 Deployment successful!"
+          echo "🌐 Website URL: http://${{ secrets.AWS_S3_BUCKET }}.s3-website-${{ secrets.AWS_REGION }}.amazonaws.com"
