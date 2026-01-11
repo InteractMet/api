@@ -30,19 +30,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+          cache: 'yarn'
           cache-dependency-path: |
-            package-lock.json
-            ${{ env.REACT_APP_PATH }}/package-lock.json
+            yarn.lock
+            ${{ env.REACT_APP_PATH }}/yarn.lock
 
       # Step 3: Install root dependencies (for WebvoxClient)
       - name: Install root dependencies
-        run: npm ci
+        run: yarn install --frozen-lockfile
 
       # Step 4: Install React app dependencies
       - name: Install React app dependencies
         working-directory: ${{ env.REACT_APP_PATH }}
-        run: npm ci
+        run: yarn install --frozen-lockfile
 
       # Step 5: Build the React app
       - name: Build React app
