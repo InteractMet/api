@@ -31,19 +31,25 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: ${{ env.REACT_APP_PATH }}/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            ${{ env.REACT_APP_PATH }}/package-lock.json
 
-      # Step 3: Install dependencies
-      - name: Install dependencies
+      # Step 3: Install root dependencies (for WebvoxClient)
+      - name: Install root dependencies
+        run: npm ci
+
+      # Step 4: Install React app dependencies
+      - name: Install React app dependencies
         working-directory: ${{ env.REACT_APP_PATH }}
         run: npm ci
 
-      # Step 4: Build the React app
+      # Step 5: Build the React app
       - name: Build React app
         working-directory: ${{ env.REACT_APP_PATH }}
         run: npm run build
 
-      # Step 5: Configure AWS credentials
+      # Step 6: Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -51,7 +57,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Step 6: Sync build files to S3
+      # Step 7: Sync build files to S3
       - name: Deploy to S3
         working-directory: ${{ env.REACT_APP_PATH }}
         run: |
@@ -61,7 +67,7 @@ jobs:
             --exclude "index.html" \
             --exclude "*.html"
 
-      # Step 7: Upload HTML files with no-cache headers (for SPA routing)
+      # Step 8: Upload HTML files with no-cache headers (for SPA routing)
       - name: Upload HTML files with no-cache
         working-directory: ${{ env.REACT_APP_PATH }}
         run: |
@@ -70,7 +76,7 @@ jobs:
             --include "*.html" \
             --cache-control "public, max-age=0, must-revalidate"
 
-      # Step 8: Output deployment URL
+      # Step 9: Output deployment URL
       - name: Deployment complete
         run: |
           echo "🚀 Deployment successful!"
