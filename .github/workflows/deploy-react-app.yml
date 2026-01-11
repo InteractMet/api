@@ -47,6 +47,9 @@ jobs:
       # Step 5: Build the React app
       - name: Build React app
         working-directory: ${{ env.REACT_APP_PATH }}
+        env:
+          VITE_WEBVOX_API_KEY: ${{ secrets.VITE_WEBVOX_API_KEY }}
+          VITE_WEBVOX_SERVER_URL: ${{ secrets.VITE_WEBVOX_SERVER_URL }}
         run: npm run build
 
       # Step 6: Configure AWS credentials
