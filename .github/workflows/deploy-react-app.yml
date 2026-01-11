@@ -12,7 +12,7 @@ on:
 
 # Set environment variables for the entire workflow
 env:
-  NODE_VERSION: '18'
+  NODE_VERSION: '20'
   REACT_APP_PATH: 'examples/react'
 
 jobs:
