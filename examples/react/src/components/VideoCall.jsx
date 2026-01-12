@@ -61,13 +61,23 @@ export function VideoCall({ client, onDisconnect }) {
   useEffect(() => {
     if (!client?.sfu) return;
 
-    const handleTranscriptionReceived = (data) => {
+    const handleTranscriptionReceived = async (data) => {
       logger.info('Message received from participant:', data);
-      setReceivedMessages(prev => [...prev, {
+
+      const newMessage = {
         participantId: data.participantId,
         text: data.text,
         timestamp: new Date()
-      }]);
+      };
+
+      setReceivedMessages(prev => [...prev, newMessage]);
+
+      // Play text-to-speech for received message
+      try {
+        await playTextToSpeech(data.text);
+      } catch (err) {
+        logger.error('Failed to play TTS:', err);
+      }
     };
 
     client.sfu.on('transcription-received', handleTranscriptionReceived);
@@ -76,6 +86,40 @@ export function VideoCall({ client, onDisconnect }) {
       client.sfu.off('transcription-received', handleTranscriptionReceived);
     };
   }, [client?.sfu]);
+
+  const playTextToSpeech = async (text) => {
+    try {
+      const response = await fetch(`${client.config.serverUrl}api/tts/synthesize`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': client.config.apiKey
+        },
+        body: JSON.stringify({
+          text: text,
+          voice: 'nova'
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('TTS request failed');
+      }
+
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+      };
+
+      await audio.play();
+      logger.info('Playing TTS audio for received message');
+    } catch (err) {
+      logger.error('TTS synthesis failed:', err);
+      throw err;
+    }
+  };
 
   // Cleanup on unmount
   useEffect(() => {
@@ -367,15 +411,26 @@ export function VideoCall({ client, onDisconnect }) {
               <div className="space-y-2 max-h-60 overflow-y-auto">
                 {receivedMessages.map((msg, index) => (
                   <div key={index} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-medium text-gray-600">
-                        {msg.participantId.substring(0, 12)}...
-                      </span>
-                      <span className="text-xs text-gray-400">
-                        {msg.timestamp.toLocaleTimeString()}
-                      </span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            {msg.participantId.substring(0, 12)}...
+                          </span>
+                          <span className="text-xs text-gray-400">
+                            {msg.timestamp.toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-800">{msg.text}</p>
+                      </div>
+                      <button
+                        onClick={() => playTextToSpeech(msg.text)}
+                        className="flex-shrink-0 p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                        title="Play audio"
+                      >
+                        ▶️
+                      </button>
                     </div>
-                    <p className="text-sm text-gray-800">{msg.text}</p>
                   </div>
                 ))}
               </div>
