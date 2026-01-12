@@ -5,23 +5,22 @@ import { useLocalMedia } from '../hooks/useLocalMedia';
 import { useRemoteParticipants } from '../hooks/useRemoteParticipants';
 import { useSFUEventHandlers } from '../hooks/useSFUEventHandlers';
 import { useProducerControls } from '../hooks/useProducerControls';
+import { useVideoCallSTT } from '../hooks/useVideoCallSTT';
 import { CONFIG } from '../constants/config';
 
-export function VideoCall({ client, onDisconnect }) {
+export function VideoCallWithSTT({ client, onDisconnect }) {
   const [roomId, setRoomId] = useState(CONFIG.DEFAULT_ROOM_ID);
-  const [participantId] = useState(`user-${Math.random().toString(36).substr(2, 9)}`);
+  const [participantId] = useState(`user-${Math.random().toString(36).substring(2, 11)}`);
   const [isInRoom, setIsInRoom] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [localVideo, setLocalVideo] = useState(null);
-  const [message, setMessage] = useState('');
-  const [receivedMessages, setReceivedMessages] = useState([]);
-  const [language, setLanguage] = useState('en');
+  const [remoteTranscripts, setRemoteTranscripts] = useState({});
+  const [broadcastEnabled, setBroadcastEnabled] = useState(false);
 
-  // Custom hooks
+  // Video call hooks
   const {
-    device,
     sendTransport,
     recvTransport,
     setupMediasoup,
@@ -49,6 +48,17 @@ export function VideoCall({ client, onDisconnect }) {
     client?.sfu
   );
 
+  // STT hook - auto-start enabled
+  const {
+    transcript,
+    isSTTActive,
+    isSTTConnected,
+    sttError,
+    startSTT,
+    stopSTT,
+    clearTranscript,
+  } = useVideoCallSTT(client, localStream, true);
+
   // Setup SFU event handlers
   useSFUEventHandlers(
     client?.sfu,
@@ -57,27 +67,19 @@ export function VideoCall({ client, onDisconnect }) {
     (producerId) => removeProducer(producerId, consumers.current)
   );
 
-  // Handle received messages from other participants
+  // Handle transcription-received event from other participants
   useEffect(() => {
     if (!client?.sfu) return;
 
-    const handleTranscriptionReceived = async (data) => {
-      logger.info('Message received from participant:', data);
-
-      const newMessage = {
-        participantId: data.participantId,
-        text: data.text,
-        timestamp: new Date()
-      };
-
-      setReceivedMessages(prev => [...prev, newMessage]);
-
-      // Play text-to-speech for received message
-      try {
-        await playTextToSpeech(data.text);
-      } catch (err) {
-        logger.error('Failed to play TTS:', err);
-      }
+    const handleTranscriptionReceived = (data) => {
+      logger.info('Transcription received from participant:', data);
+      setRemoteTranscripts(prev => ({
+        ...prev,
+        [data.participantId]: {
+          text: data.text,
+          timestamp: new Date()
+        }
+      }));
     };
 
     client.sfu.on('transcription-received', handleTranscriptionReceived);
@@ -87,39 +89,12 @@ export function VideoCall({ client, onDisconnect }) {
     };
   }, [client?.sfu]);
 
-  const playTextToSpeech = async (text) => {
-    try {
-      const response = await fetch(`${client.config.serverUrl}api/tts/synthesize`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': client.config.apiKey
-        },
-        body: JSON.stringify({
-          text: text,
-          voice: 'nova'
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('TTS request failed');
-      }
-
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl);
-      };
-
-      await audio.play();
-      logger.info('Playing TTS audio for received message');
-    } catch (err) {
-      logger.error('TTS synthesis failed:', err);
-      throw err;
+  // Broadcast transcript when enabled and transcript changes
+  useEffect(() => {
+    if (broadcastEnabled && transcript && client?.sfu && isInRoom) {
+      client.sfu.broadcastTranscript(transcript, true, 'en');
     }
-  };
+  }, [transcript, broadcastEnabled, client?.sfu, isInRoom]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -129,6 +104,9 @@ export function VideoCall({ client, onDisconnect }) {
   }, []);
 
   const cleanup = () => {
+    if (isSTTActive) {
+      stopSTT();
+    }
     cleanupLocalMedia();
     cleanupRemoteParticipants();
     cleanupMediasoup();
@@ -139,12 +117,10 @@ export function VideoCall({ client, onDisconnect }) {
       setIsJoining(true);
       setError(null);
 
-      // Ensure client socket is connected
       if (!client.isConnected || !client.socket || !client.socket.connected) {
         throw new Error('Not connected to server. Please reconnect.');
       }
 
-      // Ensure SFU manager is initialized
       if (!client.sfu) {
         throw new Error('SFU not initialized. Please reconnect.');
       }
@@ -170,7 +146,7 @@ export function VideoCall({ client, onDisconnect }) {
 
       // Connect to SFU and join room
       await client.sfu.connect();
-      const joinResponse = await client.sfu.joinRoom(roomId, participantId, language);
+      const joinResponse = await client.sfu.joinRoom(roomId, participantId);
 
       // Setup mediasoup
       await setupMediasoup();
@@ -197,12 +173,6 @@ export function VideoCall({ client, onDisconnect }) {
       }
 
       setIsInRoom(true);
-
-      // Set language preference after joining
-      if (language && language !== 'en') {
-        client.sfu.changeLanguage(language);
-      }
-
       setSuccess(`Joined room: ${roomId}`);
       setTimeout(() => setSuccess(null), CONFIG.SUCCESS_MESSAGE_DURATION_MS);
     } catch (err) {
@@ -215,13 +185,16 @@ export function VideoCall({ client, onDisconnect }) {
 
   const handleLeaveRoom = async () => {
     try {
+      if (isSTTActive) {
+        stopSTT();
+      }
+
       await client.sfu.leaveRoom();
       client.sfu.disconnect();
       cleanup();
 
       setIsInRoom(false);
       setLocalVideo(null);
-      setReceivedMessages([]);
       setSuccess('Left room');
       setTimeout(() => setSuccess(null), CONFIG.SUCCESS_MESSAGE_DURATION_MS);
     } catch (err) {
@@ -230,55 +203,28 @@ export function VideoCall({ client, onDisconnect }) {
     }
   };
 
-  const handleSendMessage = () => {
-    if (!message.trim() || !client?.sfu || !isInRoom) return;
+  const handleToggleSTT = async () => {
+    if (isSTTActive) {
+      stopSTT();
+    } else {
+      await startSTT();
+    }
+  };
 
+  const copyToClipboard = async () => {
     try {
-      logger.info('Sending broadcast message:', message);
-      logger.info('Current room:', client.sfu.getCurrentRoom());
-      logger.info('Current participant:', client.sfu.getCurrentParticipantId());
-      client.sfu.broadcastTranscript(message, true, language);
-      setMessage('');
-      setSuccess('Message sent!');
+      await navigator.clipboard.writeText(transcript);
+      setSuccess('Transcript copied to clipboard!');
       setTimeout(() => setSuccess(null), 2000);
     } catch (err) {
-      logger.error('Failed to send message:', err);
-      setError('Failed to send message');
+      setError('Failed to copy to clipboard');
     }
   };
 
-  const handleLanguageChange = (newLanguage) => {
-    setLanguage(newLanguage);
-    if (isInRoom && client?.sfu) {
-      client.sfu.changeLanguage(newLanguage);
-      setSuccess(`Language changed to ${getLanguageName(newLanguage)}`);
-      setTimeout(() => setSuccess(null), 2000);
-    }
-  };
-
-  const getLanguageName = (code) => {
-    const languages = {
-      en: 'English',
-      es: 'Spanish',
-      fr: 'French',
-      de: 'German',
-      zh: 'Chinese',
-      ja: 'Japanese',
-      ar: 'Arabic',
-      hi: 'Hindi',
-      pt: 'Portuguese',
-      ru: 'Russian',
-      it: 'Italian',
-      ko: 'Korean',
-    };
-    return languages[code] || code;
-  };
-
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
+  const toggleBroadcast = () => {
+    setBroadcastEnabled(!broadcastEnabled);
+    setSuccess(!broadcastEnabled ? 'Broadcasting enabled - your transcript is now shared' : 'Broadcasting disabled');
+    setTimeout(() => setSuccess(null), 2000);
   };
 
   // Combine local and remote videos
@@ -286,6 +232,7 @@ export function VideoCall({ client, onDisconnect }) {
 
   return (
     <div className="max-w-6xl mx-auto">
+      {/* Header Section */}
       <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-lg font-semibold text-gray-800">Participant: {participantId}</h3>
@@ -297,6 +244,7 @@ export function VideoCall({ client, onDisconnect }) {
           </button>
         </div>
 
+        {/* Room Controls */}
         <div>
           <h3 className="text-base font-semibold text-gray-700 mb-3">Room Controls</h3>
           <div className="flex gap-3 mb-4">
@@ -308,25 +256,6 @@ export function VideoCall({ client, onDisconnect }) {
               className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
               disabled={isInRoom || isJoining}
             />
-            <select
-              value={language}
-              onChange={(e) => handleLanguageChange(e.target.value)}
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white disabled:bg-gray-100 disabled:cursor-not-allowed"
-              disabled={isJoining}
-            >
-              <option value="en">🇬🇧 English</option>
-              <option value="es">🇪🇸 Spanish</option>
-              <option value="fr">🇫🇷 French</option>
-              <option value="de">🇩🇪 German</option>
-              <option value="zh">🇨🇳 Chinese</option>
-              <option value="ja">🇯🇵 Japanese</option>
-              <option value="ar">🇸🇦 Arabic</option>
-              <option value="hi">🇮🇳 Hindi</option>
-              <option value="pt">🇵🇹 Portuguese</option>
-              <option value="ru">🇷🇺 Russian</option>
-              <option value="it">🇮🇹 Italian</option>
-              <option value="ko">🇰🇷 Korean</option>
-            </select>
             {!isInRoom ? (
               <button
                 onClick={handleJoinRoom}
@@ -344,6 +273,8 @@ export function VideoCall({ client, onDisconnect }) {
               </button>
             )}
           </div>
+
+          {/* Messages */}
           {error && (
             <div className="px-4 py-3 bg-red-50 text-red-700 rounded-lg border border-red-200 mb-4">
               {error}
@@ -354,20 +285,135 @@ export function VideoCall({ client, onDisconnect }) {
               {success}
             </div>
           )}
+          {sttError && (
+            <div className="px-4 py-3 bg-orange-50 text-orange-700 rounded-lg border border-orange-200 mb-4">
+              STT: {sttError}
+            </div>
+          )}
         </div>
       </div>
 
-      {allVideos.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-          {allVideos.map((video) => (
-            <VideoElement key={video.id} video={video} />
-          ))}
-        </div>
-      )}
+      {/* Main Content */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        {/* Video Grid */}
+        <div className="lg:col-span-2">
+          {allVideos.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {allVideos.map((video) => (
+                <VideoElement key={video.id} video={video} />
+              ))}
+            </div>
+          )}
 
+          {allVideos.length === 0 && isInRoom && (
+            <div className="bg-gray-100 rounded-lg p-12 text-center">
+              <p className="text-gray-500">No video streams available</p>
+            </div>
+          )}
+        </div>
+
+        {/* Transcript Panel */}
+        {isInRoom && (
+          <div className="lg:col-span-1">
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <h4 className="text-base font-semibold text-gray-800 mb-3">Live Transcript</h4>
+
+              {/* STT Status */}
+              <div className="mb-3 p-3 bg-gray-50 rounded-lg">
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${isSTTActive ? 'bg-red-500 animate-pulse' : isSTTConnected ? 'bg-green-500' : 'bg-gray-400'}`}></span>
+                  <span className="text-sm font-medium text-gray-700">
+                    {isSTTActive ? 'Recording' : isSTTConnected ? 'Ready' : 'Not Connected'}
+                  </span>
+                  {broadcastEnabled && (
+                    <span className="ml-auto text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
+                      Broadcasting
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* My Transcript */}
+              <div className="mb-3">
+                <div className="text-xs font-semibold text-gray-600 mb-1">My Transcript:</div>
+                <div className="p-3 bg-blue-50 rounded-lg border border-blue-200 max-h-40 overflow-y-auto">
+                  {transcript ? (
+                    <p className="text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
+                      {transcript}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-gray-400 italic">
+                      {isSTTActive ? 'Listening...' : 'Your transcription will appear here'}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Remote Transcripts */}
+              {Object.keys(remoteTranscripts).length > 0 && (
+                <div className="mb-3">
+                  <div className="text-xs font-semibold text-gray-600 mb-1">Other Participants:</div>
+                  <div className="space-y-2 max-h-40 overflow-y-auto">
+                    {Object.entries(remoteTranscripts).map(([pid, data]) => (
+                      <div key={pid} className="p-2 bg-gray-50 rounded border border-gray-200">
+                        <div className="text-xs font-medium text-gray-600 mb-1">
+                          {pid.substring(0, 8)}...
+                        </div>
+                        <p className="text-sm text-gray-800">{data.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Transcript Actions */}
+              <div className="flex gap-2 mb-2">
+                <button
+                  onClick={toggleBroadcast}
+                  className={`flex-1 px-3 py-2 text-sm font-medium rounded transition-colors ${
+                    broadcastEnabled
+                      ? 'bg-blue-600 text-white hover:bg-blue-700'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                  title={broadcastEnabled ? 'Stop broadcasting transcript' : 'Broadcast transcript to others'}
+                >
+                  📡 {broadcastEnabled ? 'Broadcasting' : 'Broadcast'}
+                </button>
+                {transcript && (
+                  <>
+                    <button
+                      onClick={copyToClipboard}
+                      className="px-3 py-2 bg-gray-200 text-gray-700 text-sm font-medium rounded hover:bg-gray-300 transition-colors"
+                      title="Copy transcript"
+                    >
+                      📋
+                    </button>
+                    <button
+                      onClick={clearTranscript}
+                      className="px-3 py-2 bg-gray-200 text-gray-700 text-sm font-medium rounded hover:bg-gray-300 transition-colors disabled:opacity-50"
+                      disabled={isSTTActive}
+                      title="Clear transcript"
+                    >
+                      🗑️
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {transcript && (
+                <div className="text-xs text-gray-500 text-right">
+                  Words: {transcript.trim().split(/\s+/).filter(w => w).length}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Control Bar */}
       {isInRoom && (
-        <>
-          <div className="flex justify-center gap-4 mb-6">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <div className="flex justify-center gap-3 flex-wrap">
             <button
               onClick={toggleMute}
               className="px-6 py-3 bg-gray-200 text-gray-800 font-medium rounded-lg hover:bg-gray-300 transition-colors"
@@ -380,63 +426,21 @@ export function VideoCall({ client, onDisconnect }) {
             >
               {isVideoOff ? '📹 Start Video' : '📹 Stop Video'}
             </button>
-          </div>
 
-          {/* Message Input */}
-          <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
-            <h4 className="text-base font-semibold text-gray-800 mb-3">Send Message</h4>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Type a message to broadcast..."
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                onClick={handleSendMessage}
-                disabled={!message.trim()}
-                className="px-6 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Send
-              </button>
-            </div>
-          </div>
+            <div className="border-l border-gray-300 mx-2"></div>
 
-          {/* Received Messages */}
-          {receivedMessages.length > 0 && (
-            <div className="bg-white border border-gray-200 rounded-lg p-4">
-              <h4 className="text-base font-semibold text-gray-800 mb-3">Received Messages</h4>
-              <div className="space-y-2 max-h-60 overflow-y-auto">
-                {receivedMessages.map((msg, index) => (
-                  <div key={index} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-medium text-gray-600">
-                            {msg.participantId.substring(0, 12)}...
-                          </span>
-                          <span className="text-xs text-gray-400">
-                            {msg.timestamp.toLocaleTimeString()}
-                          </span>
-                        </div>
-                        <p className="text-sm text-gray-800">{msg.text}</p>
-                      </div>
-                      <button
-                        onClick={() => playTextToSpeech(msg.text)}
-                        className="flex-shrink-0 p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                        title="Play audio"
-                      >
-                        ▶️
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </>
+            <button
+              onClick={handleToggleSTT}
+              className={`px-6 py-3 font-medium rounded-lg transition-colors ${
+                isSTTActive
+                  ? 'bg-red-100 text-red-700 hover:bg-red-200'
+                  : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+              }`}
+            >
+              {isSTTActive ? '⏹ Stop Transcription' : '🎤 Start Transcription'}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -450,11 +454,8 @@ function VideoElement({ video }) {
       videoRef.current.srcObject = video.stream;
     }
 
-    // Cleanup when component unmounts
     return () => {
       if (videoRef.current) {
-        // Only clear srcObject, don't stop tracks
-        // Tracks are owned by the parent component (useRemoteParticipants or local media)
         videoRef.current.srcObject = null;
       }
     };

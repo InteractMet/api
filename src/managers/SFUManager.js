@@ -58,6 +58,7 @@ export class SFUManager extends EventEmitter {
     this._removeEventHandlers();
 
     const SFU_EVENTS = [
+      // Core WebRTC events
       'participant-joined',
       'participant-left',
       'new-producer',
@@ -69,6 +70,15 @@ export class SFUManager extends EventEmitter {
       'consumer-resumed',
       'audio-state-changed',
       'video-state-changed',
+      // Chat and communication events
+      'chat-message-received',
+      // Transcription and translation events
+      'transcription-received',
+      'translation-received',
+      'participant-language-changed',
+      // Participant feature events
+      'participant-speaking',
+      'on-participant-translation-play',
     ];
 
     SFU_EVENTS.forEach((event) => {
@@ -120,19 +130,37 @@ export class SFUManager extends EventEmitter {
       case 'consumer-resumed':
         console.log(`📢 ${event} event received${roomInfo}`, data);
         break;
+      case 'chat-message-received':
+        console.log(`💬 Chat message from '${data.participantId}'${roomInfo}: ${data.message?.substring(0, 50)}...`);
+        break;
+      case 'transcription-received':
+        console.log(`📝 Transcription from '${data.participantId}'${roomInfo}: ${data.text?.substring(0, 50)}...`);
+        break;
+      case 'translation-received':
+        console.log(`🌐 Translation from '${data.participantId}'${roomInfo} (${data.sourceLanguage} → ${data.targetLanguage})`);
+        break;
+      case 'participant-language-changed':
+        console.log(`🗣️ Participant '${data.participantId}' changed language to ${data.language}${roomInfo}`);
+        break;
+      case 'participant-speaking':
+        console.log(`🎙️ Participant '${data.participantId}' ${data.speaking ? 'started' : 'stopped'} speaking${roomInfo}`);
+        break;
+      case 'on-participant-translation-play':
+        console.log(`🔊 Translation playback from '${data.participantId}'${roomInfo}`);
+        break;
       default:
         console.log(`📢 SFU event: ${event}${roomInfo}`, data);
     }
   }
 
-  async joinRoom(roomId, participantId) {
+  async joinRoom(roomId, participantId, language) {
     if (!this.isConnected) {
       throw new ConnectionError('Not connected to SFU. Call connect() first.', 'SFU');
     }
 
     console.log(`🚪 Joining room '${roomId}' as participant '${participantId}'...`);
     return new Promise((resolve, reject) => {
-      this.socket.emit('join-room', { roomId, participantId }, (response) => {
+      this.socket.emit('join-room', { roomId, participantId, language }, (response) => {
         if (response && !response.error) {
           this.currentRoom = roomId;
           this.currentParticipantId = participantId; // Store participant ID
@@ -307,7 +335,89 @@ export class SFUManager extends EventEmitter {
     this.socket.emit('video-state-changed', { muted });
   }
 
+  // Chat methods
+  sendChatMessage(message) {
+    if (!this.currentRoom) {
+      console.warn('⚠️ Cannot send chat message: Not in a room');
+      return;
+    }
+    console.log(`💬 Sending chat message in room '${this.currentRoom}'`);
+    this.socket.emit('send-chat-message', { message });
+  }
+
+  // Transcription methods
+  broadcastTranscript(text, isFinal = false, language = 'en') {
+    if (!this.currentRoom) {
+      console.warn('⚠️ Cannot broadcast transcript: Not in a room');
+      return;
+    }
+    console.log(`📝 Broadcasting transcript in room '${this.currentRoom}': ${text.substring(0, 50)}...`);
+    this.socket.emit('broadcast-transcript', {
+      roomId: this.currentRoom,
+      participantId: this.currentParticipantId,
+      transcript: text,
+      text: text, // Send both for compatibility
+      isFinal,
+      language
+    });
+  }
+
+  // Translation methods
+  sendTranslation(text, sourceLanguage, targetLanguage) {
+    if (!this.currentRoom) {
+      console.warn('⚠️ Cannot send translation: Not in a room');
+      return;
+    }
+    console.log(`🌐 Sending translation in room '${this.currentRoom}' (${sourceLanguage} → ${targetLanguage})`);
+    this.socket.emit('translation', { text, sourceLanguage, targetLanguage });
+  }
+
+  changeLanguage(language) {
+    if (!this.currentRoom) {
+      console.warn('⚠️ Cannot change language: Not in a room');
+      return;
+    }
+    console.log(`🗣️ Changing language to ${language} in room '${this.currentRoom}'`);
+    this.socket.emit('language-change', { language });
+  }
+
+  // Participant methods
+  async getRoomParticipants() {
+    if (!this.currentRoom) {
+      throw new Error('Not in a room');
+    }
+    return new Promise((resolve, reject) => {
+      this.socket.emit('room-participants', (response) => {
+        if (response && !response.error) {
+          resolve(response);
+        } else {
+          reject(new Error(response?.error || 'Failed to get room participants'));
+        }
+      });
+    });
+  }
+
+  setParticipantSpeaking(speaking) {
+    if (!this.currentRoom) {
+      return;
+    }
+    this.socket.emit('participant-speaking', { speaking });
+  }
+
+  playParticipantTranslation(translationData) {
+    if (!this.currentRoom) {
+      console.warn('⚠️ Cannot play translation: Not in a room');
+      return;
+    }
+    console.log(`🔊 Playing translation in room '${this.currentRoom}'`);
+    this.socket.emit('participant-translation-play', translationData);
+  }
+
   getCurrentRoom() {
     return this.currentRoom;
+  }
+
+  getCurrentParticipantId() {
+    return this.currentParticipantId;
   }
 }
