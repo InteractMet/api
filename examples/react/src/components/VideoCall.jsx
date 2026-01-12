@@ -89,7 +89,7 @@ export function VideoCall({ client, onDisconnect }) {
 
   const playTextToSpeech = async (text) => {
     try {
-      const response = await fetch(`${client.config.serverUrl}api/tts/synthesize`, {
+      const response = await fetch(`${client.config.serverUrl}/api/tts/synthesize`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
