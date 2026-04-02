@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useWebvox } from './hooks/useWebvox';
 import { VideoCall } from './components/VideoCall';
 import { SpeechToText } from './components/SpeechToText';
+import { Translation } from './components/Translation';
 
 const API_KEY = import.meta.env.VITE_WEBVOX_API_KEY;
 const SERVER_URL = import.meta.env.VITE_WEBVOX_SERVER_URL;
@@ -79,7 +80,19 @@ function App() {
               }
             `}
           >
-            🎤 Speech-to-Text
+            🎤 Speech & Text
+          </button>
+          <button
+            onClick={() => setActiveTab('translation')}
+            className={`
+              px-8 py-4 text-base font-medium transition-all
+              ${activeTab === 'translation'
+                ? 'bg-white text-blue-600 border-b-3 border-blue-600'
+                : 'bg-gray-50 text-gray-600 border-b-3 border-transparent hover:bg-gray-100'
+              }
+            `}
+          >
+            🌐 Translation
           </button>
         </div>
       </div>
@@ -88,6 +101,7 @@ function App() {
       <div className="px-8">
         {activeTab === 'video' && <VideoCall client={client} onDisconnect={disconnect} />}
         {activeTab === 'stt' && <SpeechToText client={client} />}
+        {activeTab === 'translation' && <Translation client={client} />}
       </div>
     </div>
   );

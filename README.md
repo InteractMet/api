@@ -1,397 +1,304 @@
-# WebVox Client SDK
+# Webvox API — Simple Guide
 
-A lightweight, framework-agnostic JavaScript SDK for building real-time video calling applications with WebVox.
-
-## Features
-
-- **Authentication** - User registration, login, and session management
-- **SFU Video Calling** - Multi-participant video calls using mediasoup
-- **Framework Agnostic** - Works with React, Vue, Angular, or vanilla JavaScript
-- **TypeScript Ready** - Type definitions coming soon
-- **Real-time Events** - Event-driven architecture for real-time updates
-- **Lightweight** - Minimal dependencies, tree-shakeable
-
-## Quick Start
-
-### Installation
-
-```bash
-# Install dependencies
-npm install socket.io-client mediasoup-client
-```
-
-### Basic Usage
-
-```javascript
-import { WebvoxClient } from './path/to/client/src/index.js';
-
-// Initialize client
-const client = new WebvoxClient({
-  serverUrl: 'http://localhost:4000'
-});
-
-// Authenticate
-await client.auth.login('user@example.com', 'password');
-await client.connect();
-
-// Join video call
-await client.sfu.connect();
-await client.sfu.joinRoom('room-123', 'user-id');
-```
-
-## Examples
-
-We provide complete working examples for different use cases:
-
-### Vanilla JavaScript
-
-A pure JavaScript implementation without any framework.
-
-[View Vanilla Example →](./examples/vanilla/)
-
-```bash
-cd examples/vanilla
-python3 -m http.server 8080
-```
-
-### React
-
-React integration with custom hooks and components.
-
-[View React Example →](./examples/react/)
-
-```bash
-cd examples/react
-npm install
-npm run dev
-```
-
-## Documentation
-
-- **[Integration Guide](./docs/INTEGRATION.md)** - Complete integration guide with examples
-- **[API Reference](./docs/API.md)** - Detailed API documentation (coming soon)
-
-## Architecture
-
-The SDK is organized into focused modules:
-
-```
-client/
-├── src/
-│   ├── WebvoxClient.js          # Main SDK class
-│   ├── managers/
-│   │   ├── AuthManager.js       # Authentication
-│   │   └── SFUManager.js        # Video calling (SFU)
-│   ├── utils/
-│   │   ├── EventEmitter.js      # Event system
-│   │   ├── HttpClient.js        # HTTP requests
-│   │   └── storage.js           # Token storage
-│   └── errors/
-│       └── WebvoxError.js       # Custom errors
-```
-
-## Core Concepts
-
-### WebvoxClient
-
-The main SDK class that orchestrates all functionality:
-
-```javascript
-const client = new WebvoxClient({
-  serverUrl: 'http://localhost:4000',
-  autoConnect: false,
-  logger: console,
-});
-```
-
-### AuthManager
-
-Handles user authentication:
-
-```javascript
-// Register
-await client.auth.register(email, password);
-
-// Login
-await client.auth.login(email, password);
-
-// Logout
-await client.auth.logout();
-
-// Check status
-const isAuth = client.auth.isAuthenticated();
-const user = client.auth.getCurrentUser();
-```
-
-### SFUManager
-
-Manages video calling with mediasoup SFU:
-
-```javascript
-// Connect to SFU
-await client.sfu.connect();
-
-// Join room
-await client.sfu.joinRoom(roomId, participantId);
-
-// Get router capabilities
-const caps = await client.sfu.getRouterCapabilities(roomId);
-
-// Create transport
-const transport = await client.sfu.createTransport('send');
-
-// Create producer
-const { producerId } = await client.sfu.createProducer(
-  transportId, 'video', rtpParameters
-);
-
-// Leave room
-await client.sfu.leaveRoom();
-```
-
-## Events
-
-The SDK uses an event-driven architecture:
-
-### Authentication Events
-
-```javascript
-client.auth.on('login', (user) => {
-  console.log('User logged in:', user);
-});
-
-client.auth.on('logout', () => {
-  console.log('User logged out');
-});
-
-client.auth.on('token-expired', () => {
-  console.log('Session expired');
-});
-```
-
-### SFU Events
-
-```javascript
-client.sfu.on('participant-joined', (data) => {
-  console.log('Participant joined:', data.participantId);
-});
-
-client.sfu.on('participant-left', (data) => {
-  console.log('Participant left:', data.participantId);
-});
-
-client.sfu.on('new-producer', (data) => {
-  console.log('New media producer:', data.producerId);
-});
-
-client.sfu.on('producer-closed', (data) => {
-  console.log('Producer closed:', data.producerId);
-});
-```
-
-## Framework Integration
-
-### React Hook
-
-```jsx
-import { useWebvox } from './hooks/useWebvox';
-
-function App() {
-  const { client, user, login, logout } = useWebvox();
-
-  return user ? (
-    <VideoCall client={client} />
-  ) : (
-    <Login onLogin={login} />
-  );
-}
-```
-
-### Vue Composable
-
-```vue
-<script setup>
-import { useWebvox } from '@/composables/useWebvox';
-
-const { client, user, login } = useWebvox();
-</script>
-```
-
-### Angular Service
-
-```typescript
-@Injectable({ providedIn: 'root' })
-export class WebvoxService {
-  private client: WebvoxClient;
-
-  constructor() {
-    this.client = new WebvoxClient({
-      serverUrl: 'http://localhost:4000'
-    });
-  }
-}
-```
-
-## Error Handling
-
-The SDK provides custom error classes for better error handling:
-
-```javascript
-import {
-  WebvoxError,
-  AuthenticationError,
-  ConnectionError,
-  ValidationError,
-  ServiceUnavailableError
-} from 'webvox-client';
-
-try {
-  await client.auth.login(email, password);
-} catch (error) {
-  if (error.code === 'AUTH_ERROR') {
-    console.error('Invalid credentials');
-  } else if (error.code === 'CONNECTION_ERROR') {
-    console.error('Connection failed:', error.service);
-  }
-}
-```
-
-## Browser Support
-
-- Chrome 74+
-- Firefox 66+
-- Safari 12.1+
-- Edge 79+
-
-Requires WebRTC support for video calling features.
-
-## Requirements
-
-- Modern browser with ES6+ support
-- WebRTC support (for video calling)
-- HTTPS (for production, required by getUserMedia API)
-
-## Development
-
-### Project Structure
-
-```
-client/
-├── src/                      # Source code
-├── examples/                 # Example implementations
-│   ├── vanilla/             # Vanilla JS example
-│   └── react/               # React example
-├── docs/                     # Documentation
-└── package.json
-```
-
-### Running Examples Locally
-
-**Vanilla JavaScript:**
-```bash
-cd examples/vanilla
-python3 -m http.server 8080
-# Open http://localhost:8080
-```
-
-**React:**
-```bash
-cd examples/react
-npm install
-npm run dev
-# Open http://localhost:3000
-```
-
-### Prerequisites
-
-Make sure the WebVox server is running:
-
-```bash
-# From webvox root directory
-npm run docker:up
-npm run dev
-```
-
-## API Overview
-
-### WebvoxClient
-
-```javascript
-const client = new WebvoxClient(config)
-await client.connect()
-client.disconnect()
-await client.reconnect()
-client.getSocket()
-```
-
-### AuthManager
-
-```javascript
-await client.auth.register(email, password)
-await client.auth.login(email, password)
-await client.auth.logout()
-await client.auth.getUser()
-client.auth.getToken()
-client.auth.isAuthenticated()
-client.auth.getCurrentUser()
-```
-
-### SFUManager
-
-```javascript
-await client.sfu.connect()
-client.sfu.disconnect()
-await client.sfu.joinRoom(roomId, participantId)
-await client.sfu.leaveRoom()
-await client.sfu.getRouterCapabilities(roomId)
-await client.sfu.setRtpCapabilities(caps)
-await client.sfu.createTransport(direction)
-await client.sfu.connectTransport(id, dtlsParams)
-await client.sfu.createProducer(transportId, kind, rtpParams)
-await client.sfu.createConsumer(transportId, producerId, rtpCaps)
-await client.sfu.pauseProducer(producerId)
-await client.sfu.resumeProducer(producerId)
-await client.sfu.closeProducer(producerId)
-client.sfu.setAudioState(muted)
-client.sfu.getCurrentRoom()
-```
-
-For detailed API documentation, see [API Reference](./docs/API.md).
-
-## Roadmap
-
-- [ ] TypeScript type definitions
-- [ ] Screen sharing support
-- [ ] Recording capabilities
-- [ ] STT (Speech-to-Text) integration
-- [ ] TTS (Text-to-Speech) integration
-- [ ] Usage tracking integration
-- [ ] Publish to npm
-- [ ] Add tests
-- [ ] Add chat functionality
-- [ ] Add file sharing
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-MIT
-
-## Support
-
-For issues and questions:
-- Check the [Integration Guide](./docs/INTEGRATION.md)
-- Check the [Troubleshooting](./docs/INTEGRATION.md#troubleshooting) section
-- Open an issue on GitHub
-
-## Related
-
-- [WebVox Server](../) - The WebVox server application
-- [mediasoup](https://mediasoup.org/) - WebRTC SFU library
-- [Socket.IO](https://socket.io/) - Real-time communication
+Think of **webvox** as a magic telephone switchboard. Your app talks to webvox, and webvox talks to all the other services (video calls, speech, voice, translation) for you. You only need to know how to talk to webvox.
 
 ---
 
-Built with ❤️ for real-time video communication
+## Before Anything — Get Your Key
+
+Every request needs an **API key**. Think of it like a password badge that lets you through the door.
+
+You get this key from the admin panel. It looks like:
+
+```
+wvx_live_abc123...
+```
+
+---
+
+## Step 1 — Connect
+
+Install socket.io if you haven't:
+
+```bash
+npm install socket.io-client
+```
+
+Then connect:
+
+```js
+import { io } from 'socket.io-client'
+
+const socket = io('https://webvox.interactmet.ca', {
+  auth: { apiKey: 'YOUR_API_KEY_HERE' }
+})
+
+socket.on('connect', () => {
+  console.log('Connected!')
+})
+
+socket.on('connect_error', (err) => {
+  console.log('Could not connect:', err.message)
+})
+```
+
+That's it. You're in. Now you can use any feature below.
+
+---
+
+## Feature 1 — Video & Audio Calls
+
+### Join a room
+
+```js
+// First, connect to the video system
+socket.emit('connect-sfu', (res) => {
+  if (res.success) {
+    // Now join a room
+    socket.emit('join-room', { roomId: 'my-room-123' })
+  }
+})
+```
+
+### Leave a room
+
+```js
+socket.emit('leave-room')
+```
+
+> **What is SFU?** It's the thing that handles video and audio between multiple people in a call. You don't need to understand it — just call `connect-sfu` first, then `join-room`.
+
+---
+
+## Feature 2 — Speech to Text (Google, streaming)
+
+Turn someone's voice into text, word by word, as they speak.
+
+```js
+// Step 1: Connect to speech service
+socket.emit('connect-stt', (res) => {
+  if (res.success) {
+
+    // Step 2: Start listening
+    socket.emit('start-transcription', {
+      language: 'en-US',  // what language they're speaking
+      model: 'chirp'
+    })
+
+    // Step 3: Send audio chunks (you get these from the microphone)
+    socket.emit('audio-data', { data: base64AudioChunk })
+
+    // Step 4: Stop when done
+    socket.emit('stop-transcription')
+  }
+})
+
+// Step 5: Receive the words
+socket.on('transcript', ({ text, isFinal }) => {
+  if (isFinal) {
+    console.log('They said:', text)
+  }
+})
+```
+
+---
+
+## Feature 3 — Speech to Text (Whisper, one chunk at a time)
+
+Good for short recordings. Send a recorded audio file, get the text back.
+
+```js
+socket.emit('whisper-transcribe', {
+  audio: audioBuffer,      // your recorded audio (Buffer or ArrayBuffer)
+  language: 'en',          // optional, auto-detects if not set
+  chunkSeconds: 5          // how many seconds of audio this is
+}, (res) => {
+  if (res.success) {
+    console.log('They said:', res.text)
+  } else {
+    console.log('Error:', res.error)
+  }
+})
+```
+
+---
+
+## Feature 4 — Text to Speech (make the computer talk)
+
+Give it text, it gives you back audio that you can play.
+
+### Option A — Streaming (audio comes back piece by piece, starts playing faster)
+
+```js
+socket.emit('synthesize-speech', {
+  text: 'Hello! How are you today?',
+  voice: 'alloy',    // see voices list below
+  model: 'tts-1',
+  speed: 1.0         // 0.25 (slow) to 4.0 (fast)
+}, (ack) => {
+  // ack tells you the request was received
+})
+
+// Audio arrives in chunks — collect them
+const chunks = []
+
+socket.on('speech-audio-chunk', (chunk) => {
+  chunks.push(chunk)
+})
+
+socket.on('speech-audio-end', () => {
+  // All done — play the audio
+  const blob = new Blob(chunks, { type: 'audio/mpeg' })
+  const url = URL.createObjectURL(blob)
+  new Audio(url).play()
+})
+
+socket.on('speech-audio-error', ({ error }) => {
+  console.log('TTS failed:', error)
+})
+```
+
+### Option B — HTTP (simpler, whole file at once)
+
+```js
+const response = await fetch('https://webvox.interactmet.ca/api/tts/speak', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'x-api-key': 'YOUR_API_KEY_HERE'
+  },
+  body: JSON.stringify({
+    text: 'Hello! How are you today?',
+    voice: 'alloy',
+    model: 'tts-1'
+  })
+})
+
+const blob = await response.blob()
+const url = URL.createObjectURL(blob)
+new Audio(url).play()
+```
+
+### Available Voices
+
+| Voice | Sounds like |
+|-------|-------------|
+| `alloy` | Neutral, balanced |
+| `echo` | Warm |
+| `fable` | Storyteller |
+| `onyx` | Deep, serious |
+| `nova` | Energetic |
+| `shimmer` | Soft, gentle |
+
+### Available Models
+
+| Model | When to use |
+|-------|-------------|
+| `tts-1` | Faster, cheaper — good for most cases |
+| `tts-1-hd` | Slower, better quality |
+
+---
+
+## Feature 5 — Translation
+
+Translate text from one language to another.
+
+```js
+socket.emit('translate', {
+  text: 'Hello, how are you?',
+  targetLanguage: 'es',       // language to translate TO
+  sourceLanguage: 'en'        // language to translate FROM (optional — auto-detects)
+}, (res) => {
+  if (res.success) {
+    console.log('Translated:', res.translatedText)  // "Hola, ¿cómo estás?"
+    console.log('Characters used:', res.charCount)
+  }
+})
+```
+
+**Response fields:**
+
+```js
+{
+  success: true,
+  translatedText: 'Hola, ¿cómo estás?',
+  detectedSourceLanguage: 'en',
+  charCount: 20,
+  cost: 0.16    // in USD cents, roughly
+}
+```
+
+---
+
+## Full React Example
+
+Here's a small React component that connects and translates text:
+
+```jsx
+import { useEffect, useState } from 'react'
+import { io } from 'socket.io-client'
+
+const socket = io('https://webvox.interactmet.ca', {
+  auth: { apiKey: 'YOUR_API_KEY_HERE' }
+})
+
+export default function Translator() {
+  const [connected, setConnected] = useState(false)
+  const [result, setResult] = useState('')
+
+  useEffect(() => {
+    socket.on('connect', () => setConnected(true))
+    socket.on('disconnect', () => setConnected(false))
+    return () => socket.disconnect()
+  }, [])
+
+  function translate() {
+    socket.emit('translate', {
+      text: 'Hello world',
+      targetLanguage: 'es'
+    }, (res) => {
+      if (res.success) setResult(res.translatedText)
+    })
+  }
+
+  return (
+    <div>
+      <p>Status: {connected ? 'Connected' : 'Not connected'}</p>
+      <button onClick={translate}>Translate "Hello world" to Spanish</button>
+      {result && <p>Result: {result}</p>}
+    </div>
+  )
+}
+```
+
+---
+
+## Quick Reference
+
+| What you want to do | What to call |
+|---|---|
+| Join a video/audio call | `connect-sfu` → `join-room` |
+| Start live transcription | `connect-stt` → `start-transcription` |
+| Transcribe a recording | `whisper-transcribe` |
+| Make the computer speak (socket) | `synthesize-speech` |
+| Make the computer speak (HTTP) | `POST /api/tts/speak` |
+| Translate text | `translate` |
+| Get available voices | `get-tts-voices` |
+| Get available TTS models | `get-tts-models` |
+| Check server is alive | `GET /health` |
+
+---
+
+## Common Mistakes
+
+**"Authentication failed"**
+→ You forgot to pass `auth: { apiKey: '...' }` when connecting.
+
+**"Origin not allowed"**
+→ Your website's address isn't in the allowed list for your API key. Ask the admin to add it.
+
+**"Service not available"**
+→ That feature isn't set up on the server yet (missing API key on the server side).
+
+**Audio doesn't play**
+→ Browsers block audio that wasn't triggered by a user click. Make sure `new Audio().play()` runs inside a button click handler.

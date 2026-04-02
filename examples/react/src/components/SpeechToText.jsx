@@ -1,264 +1,414 @@
 import { useState, useEffect, useRef } from 'react';
 import { logger } from '../utils/logger';
-import { AudioProcessor } from '../utils/audioProcessor';
 
 export function SpeechToText({ client }) {
-  const [transcript, setTranscript] = useState('');
-  const [isRecording, setIsRecording] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isSTTConnected, setIsSTTConnected] = useState(false);
-  const [error, setError] = useState(null);
-  const [success, setSuccess] = useState(null);
+  const RATE = 0.66; // $ per minute
 
-  const audioProcessorRef = useRef(null);
+  // STT state
+  const [finalTranscript, setFinalTranscript] = useState('');
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [sttError, setSttError] = useState(null);
+  const [sttSeconds, setSttSeconds] = useState(0);
+  const recognitionRef = useRef(null);
 
-  // Listen for transcripts from server
+  // TTS state
+  const [ttsText, setTtsText] = useState('');
+  const [isSynthesizing, setIsSynthesizing] = useState(false);
+  const [ttsError, setTtsError] = useState(null);
+  const [ttsChars, setTtsChars] = useState(0);
+
+  const sttCost = ((sttSeconds / 60) * RATE).toFixed(4);
+  const ttsCost = ((ttsChars / 750) * RATE).toFixed(4);
+  const totalCost = (parseFloat(sttCost) + parseFloat(ttsCost)).toFixed(4);
+  const mediaSourceRef = useRef(null);
+  const sourceBufferRef = useRef(null);
+  const audioElRef = useRef(null);
+  const chunkQueueRef = useRef([]);
+  const isAppendingRef = useRef(false);
+
+  // Auto-start listening when component mounts
+  useEffect(() => {
+    startListening();
+    return () => stopListening();
+  }, []);
+
+  // MP3 streaming player using MediaSource API
   useEffect(() => {
     if (!client?.socket) return;
 
-    const handleTranscript = (data) => {
-      logger.info('Received transcript:', data);
+    const appendNext = () => {
+      if (
+        isAppendingRef.current ||
+        chunkQueueRef.current.length === 0 ||
+        !sourceBufferRef.current ||
+        sourceBufferRef.current.updating
+      ) return;
 
-      // Handle both formats: { text, isFinal } and { transcript, isFinal }
-      const text = data.text || data.transcript;
-      const isFinal = data.isFinal || false;
-
-      if (isFinal) {
-        setTranscript((prev) => prev + ' ' + text);
-      } else {
-        // For interim results, you could show them differently
-        // For now, we'll only append final results
+      isAppendingRef.current = true;
+      const chunk = chunkQueueRef.current.shift();
+      try {
+        sourceBufferRef.current.appendBuffer(chunk);
+      } catch (e) {
+        isAppendingRef.current = false;
+        logger.error('appendBuffer error:', e);
       }
     };
 
-    client.socket.on('transcript', handleTranscript);
+    const initMediaSource = () => {
+      const ms = new MediaSource();
+      mediaSourceRef.current = ms;
+
+      const audio = new Audio();
+      audioElRef.current = audio;
+      audio.src = URL.createObjectURL(ms);
+
+      ms.addEventListener('sourceopen', () => {
+        const sb = ms.addSourceBuffer('audio/mpeg');
+        sourceBufferRef.current = sb;
+
+        sb.addEventListener('updateend', () => {
+          isAppendingRef.current = false;
+          appendNext();
+        });
+
+        audio.play().catch((e) => logger.error('Audio play error:', e));
+        appendNext();
+      });
+    };
+
+    const toArrayBuffer = (data) => {
+      if (data instanceof ArrayBuffer) return data;
+      if (data instanceof Uint8Array) return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      if (data?.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data).buffer;
+      return new Uint8Array(Object.values(data)).buffer;
+    };
+
+    const handleChunk = (data) => {
+      try {
+        if (!mediaSourceRef.current) initMediaSource();
+        chunkQueueRef.current.push(toArrayBuffer(data));
+        appendNext();
+      } catch (err) {
+        logger.error('Failed to handle audio chunk:', err);
+      }
+    };
+
+    const cleanup = () => {
+      chunkQueueRef.current = [];
+      isAppendingRef.current = false;
+      if (mediaSourceRef.current?.readyState === 'open') {
+        try { mediaSourceRef.current.endOfStream(); } catch (_) {}
+      }
+      if (audioElRef.current) {
+        URL.revokeObjectURL(audioElRef.current.src);
+        audioElRef.current = null;
+      }
+      mediaSourceRef.current = null;
+      sourceBufferRef.current = null;
+    };
+
+    const handleEnd = () => {
+      setIsSynthesizing(false);
+      const endStream = () => {
+        if (sourceBufferRef.current?.updating) {
+          sourceBufferRef.current.addEventListener('updateend', endStream, { once: true });
+        } else if (mediaSourceRef.current?.readyState === 'open') {
+          try { mediaSourceRef.current.endOfStream(); } catch (_) {}
+        }
+      };
+      endStream();
+    };
+
+    const handleError = ({ error }) => {
+      setTtsError(error || 'Synthesis failed');
+      setIsSynthesizing(false);
+      cleanup();
+    };
+
+    client.socket.on('speech-audio-chunk', handleChunk);
+    client.socket.on('speech-audio-end', handleEnd);
+    client.socket.on('speech-audio-error', handleError);
 
     return () => {
-      client.socket.off('transcript', handleTranscript);
+      client.socket.off('speech-audio-chunk', handleChunk);
+      client.socket.off('speech-audio-end', handleEnd);
+      client.socket.off('speech-audio-error', handleError);
     };
   }, [client]);
 
-  const connectToSTT = async () => {
+  const CHUNK_INTERVAL_MS = 3000;
+  // RMS threshold — chunks below this are considered silence and skipped
+  const SILENCE_THRESHOLD = 0.01;
+
+  const getAudioRMS = async (blob) => {
     try {
-      setIsConnecting(true);
-      setError(null);
-
-      // Connect to STT service
-      const response = await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Connection timeout')), 10000);
-
-        client.socket.emit('connect-stt', (response) => {
-          clearTimeout(timeout);
-          if (response.success) {
-            resolve(response);
-          } else {
-            reject(new Error(response.error || 'Failed to connect to STT'));
-          }
-        });
-      });
-
-      setIsSTTConnected(true);
-      setSuccess('Connected to Speech-to-Text service');
-      logger.info('Connected to STT service');
-
-      setTimeout(() => setSuccess(null), 3000);
-    } catch (err) {
-      logger.error('Failed to connect to STT:', err);
-      setError(err.message);
-      setIsSTTConnected(false);
-    } finally {
-      setIsConnecting(false);
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioCtx = new AudioContext();
+      const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+      const data = decoded.getChannelData(0);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      audioCtx.close();
+      return Math.sqrt(sum / data.length);
+    } catch {
+      return 1; // if we can't check, assume speech
     }
   };
 
-  const startTranscription = async () => {
-    try {
-      setError(null);
+  const startListening = async () => {
+    if (!client?.socket) { setSttError('Not connected to server.'); return; }
+    setSttError(null);
 
-      if (!isSTTConnected) {
-        throw new Error('Not connected to STT service. Please connect first.');
-      }
-
-      // Start transcription session on server
-      client.socket.emit('start-transcription', {
-        language: 'en-US'
-      });
-
-      logger.info('Starting transcription...');
-
-      // Create audio processor
-      const onAudioChunk = (chunk) => {
-        if (client.socket.connected) {
-          // Send as binary buffer via Socket.IO
-          // Socket.IO will handle the binary transport
-          client.socket.emit('audio-data', chunk);
+    let active = true;
+    let stream = null;
+    let currentRecorder = null;
+    recognitionRef.current = {
+      stop: () => {
+        active = false;
+        if (currentRecorder && currentRecorder.state === 'recording') {
+          currentRecorder.stop();
         }
-      };
+        stream?.getTracks().forEach((t) => t.stop());
+      },
+    };
 
-      const onError = (err) => {
-        logger.error('Audio processor error:', err);
-        setError('Audio processing error: ' + err.message);
-        stopTranscription();
-      };
-
-      audioProcessorRef.current = new AudioProcessor(onAudioChunk, onError);
-      await audioProcessorRef.current.start();
-
-      setIsRecording(true);
-      setSuccess('Recording started - speak now!');
-      setTimeout(() => setSuccess(null), 3000);
-
-      logger.info('Recording started');
-    } catch (err) {
-      logger.error('Failed to start transcription:', err);
-      setError(err.message);
-
-      // Cleanup on error
-      if (audioProcessorRef.current) {
-        audioProcessorRef.current.stop();
-        audioProcessorRef.current = null;
-      }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      setSttError('Microphone permission denied.');
+      return;
     }
+
+    if (!active) { stream.getTracks().forEach((t) => t.stop()); return; }
+
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/webm';
+
+    const recordChunk = () => {
+      if (!active) return;
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      currentRecorder = recorder;
+      const chunks = [];
+
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+      recorder.onstop = async () => {
+        if (!active || chunks.length === 0) { recordChunk(); return; }
+
+        try {
+          const blob = new Blob(chunks, { type: mimeType });
+
+          // Skip silent chunks — avoids Whisper hallucinations on silence
+          const rms = await getAudioRMS(blob);
+          if (rms < SILENCE_THRESHOLD) { recordChunk(); return; }
+
+          const arrayBuffer = await blob.arrayBuffer();
+          client.socket.emit(
+            'whisper-transcribe',
+            { audio: arrayBuffer, language: 'en', chunkSeconds: CHUNK_INTERVAL_MS / 1000 },
+            (response) => {
+              if (response?.success && response.text) {
+                setFinalTranscript((prev) => (prev ? prev + ' ' + response.text : response.text));
+                setSttSeconds((prev) => prev + (CHUNK_INTERVAL_MS / 1000));
+              }
+            }
+          );
+        } catch (err) {
+          setSttError('Failed to send audio: ' + err.message);
+        }
+
+        recordChunk();
+      };
+
+      recorder.start();
+      setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, CHUNK_INTERVAL_MS);
+    };
+
+    recordChunk();
+    setIsListening(true);
   };
 
-  const stopTranscription = () => {
-    try {
-      // Stop transcription session
-      if (client?.socket?.connected) {
-        client.socket.emit('stop-transcription');
-      }
-
-      // Stop audio processor
-      if (audioProcessorRef.current) {
-        audioProcessorRef.current.stop();
-        audioProcessorRef.current = null;
-      }
-
-      setIsRecording(false);
-      setSuccess('Recording stopped');
-      setTimeout(() => setSuccess(null), 3000);
-      logger.info('Recording stopped');
-    } catch (err) {
-      logger.error('Failed to stop transcription:', err);
-      setError(err.message);
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
     }
+    setIsListening(false);
+    setInterimTranscript('');
   };
 
   const clearTranscript = () => {
-    setTranscript('');
-    setSuccess('Transcript cleared');
-    setTimeout(() => setSuccess(null), 2000);
+    setFinalTranscript('');
+    setInterimTranscript('');
   };
 
   const copyToClipboard = async () => {
     try {
-      await navigator.clipboard.writeText(transcript);
-      setSuccess('Copied to clipboard!');
-      setTimeout(() => setSuccess(null), 2000);
-    } catch (err) {
-      setError('Failed to copy to clipboard');
+      await navigator.clipboard.writeText(finalTranscript);
+    } catch {
+      setSttError('Failed to copy');
     }
   };
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (isRecording) {
-        stopTranscription();
+  // TTS function
+  const synthesizeSpeech = () => {
+    if (!ttsText.trim()) return;
+    setIsSynthesizing(true);
+    setTtsError(null);
+
+    client.socket.emit('synthesize-speech', {
+      text: ttsText.trim(),
+      voice: 'alloy',
+      model: 'tts-1',
+    }, (response) => {
+      if (response && !response.success) {
+        setTtsError(response.error || 'Synthesis failed');
+        setIsSynthesizing(false);
+      } else if (response?.success) {
+        setTtsChars((prev) => prev + (ttsText.trim().length));
       }
-    };
-  }, [isRecording]);
+    });
+  };
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <h2 className="text-2xl font-bold text-gray-800 mb-6">Speech-to-Text (English)</h2>
+    <div className="max-w-4xl mx-auto space-y-8">
 
-      <div className="flex flex-wrap gap-3 mb-6">
-        {!isSTTConnected ? (
-          <button
-            onClick={connectToSTT}
-            disabled={isConnecting}
-            className="px-6 py-3 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {isConnecting ? 'Connecting...' : 'Connect to STT Service'}
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={isRecording ? stopTranscription : startTranscription}
-              className={`px-6 py-3 font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                isRecording
-                  ? 'bg-red-600 text-white hover:bg-red-700'
-                  : 'bg-blue-600 text-white hover:bg-blue-700'
-              }`}
-              disabled={!isSTTConnected}
-            >
-              {isRecording ? '⏹ Stop Recording' : '🎤 Start Recording'}
-            </button>
-
-            {transcript && (
+      {/* ── SPEECH TO TEXT ── */}
+      <div>
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <h2 className="text-2xl font-bold text-gray-800">Speech to Text</h2>
+            {isListening && (
+              <span className="flex items-center gap-1.5 text-sm text-red-600 font-medium">
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse inline-block"></span>
+                Listening
+              </span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            {finalTranscript && (
               <>
-                <button
-                  onClick={clearTranscript}
-                  className="px-6 py-3 bg-gray-200 text-gray-800 font-medium rounded-lg hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  disabled={isRecording}
-                >
-                  Clear Transcript
+                <button onClick={copyToClipboard} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors">
+                  📋 Copy
                 </button>
-                <button
-                  onClick={copyToClipboard}
-                  className="px-6 py-3 bg-gray-200 text-gray-800 font-medium rounded-lg hover:bg-gray-300 transition-colors"
-                >
-                  📋 Copy to Clipboard
+                <button onClick={clearTranscript} className="px-4 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors">
+                  Clear
                 </button>
               </>
             )}
-          </>
-        )}
-      </div>
+            <button
+              onClick={isListening ? stopListening : startListening}
 
-      {error && (
-        <div className="mb-4 px-4 py-3 bg-red-50 text-red-700 rounded-lg border border-red-200">
-          {error}
-        </div>
-      )}
-      {success && (
-        <div className="mb-4 px-4 py-3 bg-green-50 text-green-700 rounded-lg border border-green-200">
-          {success}
-        </div>
-      )}
-
-      {isSTTConnected && (
-        <div className="mb-6 p-4 bg-white border border-gray-200 rounded-lg">
-          <div className="flex items-center gap-3 mb-2">
-            <span className={`w-3 h-3 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-green-500'}`}></span>
-            <span className="text-gray-700 font-medium">
-              {isRecording ? 'Recording in progress...' : 'Ready to record'}
-            </span>
-          </div>
-          <div className="text-sm text-gray-500">
-            Language: English (US) • Format: PCM LINEAR16 • Sample Rate: 16kHz
+              className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
+                isListening
+                  ? 'bg-red-100 text-red-700 hover:bg-red-200'
+                  : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+              }`}
+            >
+              {isListening ? '⏹ Stop' : '🎤 Start'}
+            </button>
           </div>
         </div>
-      )}
 
-      <div className="bg-white border border-gray-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-gray-800 mb-4">Transcript:</h3>
-        <div className="min-h-50 p-4 bg-gray-50 rounded-lg border border-gray-200 whitespace-pre-wrap text-gray-800">
-          {transcript || (
-            <span className="text-gray-400 italic">
-              {isSTTConnected
-                ? 'Click "Start Recording" and begin speaking...'
-                : 'Connect to STT service to begin'}
-            </span>
+        {sttError && <div className="mb-4 px-4 py-3 bg-red-50 text-red-700 rounded-lg border border-red-200">{sttError}</div>}
+
+        <div className="bg-white border border-gray-200 rounded-lg p-6 min-h-48">
+          {finalTranscript || interimTranscript ? (
+            <p className="text-gray-800 leading-relaxed whitespace-pre-wrap text-lg">
+              {finalTranscript}
+              {interimTranscript && (
+                <span className="text-gray-400 italic"> {interimTranscript}</span>
+              )}
+            </p>
+          ) : (
+            <p className="text-gray-400 italic text-center mt-12">
+              {isListening ? 'Speak now...' : 'Start listening to transcribe speech'}
+            </p>
           )}
         </div>
-        {transcript && (
-          <div className="mt-3 text-sm text-gray-500 text-right">
-            Words: {transcript.trim().split(/\s+/).filter(w => w).length}
+        {finalTranscript && (
+          <div className="mt-2 text-sm text-gray-400 text-right">
+            {finalTranscript.trim().split(/\s+/).filter(w => w).length} words
           </div>
         )}
       </div>
+
+      {/* ── USAGE & COST ── */}
+      {(sttSeconds > 0 || ttsChars > 0) && (
+        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-600 mb-3">Usage & Cost (@${RATE}/min)</h3>
+          <div className="grid grid-cols-3 gap-4 text-center">
+            <div>
+              <div className="text-xs text-gray-500 mb-1">STT</div>
+              <div className="text-sm font-medium text-gray-800">{(sttSeconds / 60).toFixed(2)} min</div>
+              <div className="text-sm font-semibold text-blue-600">${sttCost}</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500 mb-1">TTS</div>
+              <div className="text-sm font-medium text-gray-800">{ttsChars} chars</div>
+              <div className="text-sm font-semibold text-purple-600">${ttsCost}</div>
+            </div>
+            <div className="border-l border-gray-200">
+              <div className="text-xs text-gray-500 mb-1">Total</div>
+              <div className="text-sm font-medium text-gray-800">&nbsp;</div>
+              <div className="text-base font-bold text-green-600">${totalCost}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── DIVIDER ── */}
+      <hr className="border-gray-200" />
+
+      {/* ── TEXT TO SPEECH ── */}
+      <div>
+        <h2 className="text-2xl font-bold text-gray-800 mb-6">Text to Speech</h2>
+
+        <div className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Enter text to synthesize</label>
+            <textarea
+              value={ttsText}
+              onChange={(e) => setTtsText(e.target.value)}
+              placeholder="Type something to convert to speech..."
+              rows={4}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800"
+            />
+            <div className="mt-1 text-sm text-gray-400 text-right">{ttsText.length} characters</div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={synthesizeSpeech}
+              disabled={isSynthesizing || !ttsText.trim()}
+              className="px-6 py-3 bg-purple-600 text-white font-medium rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {isSynthesizing ? 'Synthesizing...' : '🔊 Synthesize Speech'}
+            </button>
+            {ttsText && (
+              <button
+                onClick={() => setTtsText('')}
+                className="px-6 py-3 bg-gray-200 text-gray-800 font-medium rounded-lg hover:bg-gray-300 transition-colors"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          {ttsError && <div className="px-4 py-3 bg-red-50 text-red-700 rounded-lg border border-red-200">{ttsError}</div>}
+
+          {isSynthesizing && (
+            <div className="p-4 bg-purple-50 border border-purple-200 rounded-lg flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full bg-purple-500 animate-pulse flex-shrink-0"></span>
+              <span className="text-purple-700 font-medium">Streaming audio...</span>
+            </div>
+          )}
+        </div>
+      </div>
+
     </div>
   );
 }
