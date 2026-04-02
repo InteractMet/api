@@ -38,9 +38,10 @@ export class AudioProcessor {
       this.source = this.audioContext.createMediaStreamSource(this.stream);
 
       // Use ScriptProcessorNode (deprecated but widely supported)
-      // Buffer size: 4096 samples = 256ms at 16kHz
-      const bufferSize = 4096;
+      // Buffer size: 2048 samples = 128ms at 16kHz
+      const bufferSize = 2048;
       this.processor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
+      this._leftover = null; // carry partial 640-byte chunks across callbacks
 
       this.processor.onaudioprocess = (e) => {
         if (!this.isProcessing) return;
@@ -80,33 +81,42 @@ export class AudioProcessor {
   }
 
   /**
-   * Convert Int16Array to Buffer and split into 640-byte chunks
+   * Convert Int16Array to Buffer and split into 640-byte chunks.
+   * Leftover bytes are carried to the next callback so nothing is dropped.
    */
   sendChunks(int16Array) {
-    // Convert Int16Array to Buffer (2 bytes per sample)
+    const CHUNK_SIZE = 640; // bytes (320 samples × 2)
+
+    // Convert Int16Array to Uint8Array (little-endian)
     const buffer = new ArrayBuffer(int16Array.length * 2);
     const view = new DataView(buffer);
-
     for (let i = 0; i < int16Array.length; i++) {
-      view.setInt16(i * 2, int16Array[i], true); // true = little-endian
+      view.setInt16(i * 2, int16Array[i], true);
+    }
+    const incoming = new Uint8Array(buffer);
+
+    // Prepend any leftover bytes from the previous callback
+    let data = incoming;
+    if (this._leftover && this._leftover.length > 0) {
+      const merged = new Uint8Array(this._leftover.length + incoming.length);
+      merged.set(this._leftover);
+      merged.set(incoming, this._leftover.length);
+      data = merged;
     }
 
-    // Split into 640-byte chunks (320 samples)
-    const CHUNK_SIZE = 640; // bytes
-    const uint8Array = new Uint8Array(buffer);
-
-    for (let offset = 0; offset < uint8Array.length; offset += CHUNK_SIZE) {
-      const chunk = uint8Array.slice(offset, offset + CHUNK_SIZE);
-
-      // Only send full 640-byte chunks
-      if (chunk.length === CHUNK_SIZE) {
-        this.onAudioChunk(chunk);
-      }
+    let offset = 0;
+    while (offset + CHUNK_SIZE <= data.length) {
+      this.onAudioChunk(data.slice(offset, offset + CHUNK_SIZE));
+      offset += CHUNK_SIZE;
     }
+
+    // Save remaining bytes for next callback
+    this._leftover = data.slice(offset);
   }
 
   stop() {
     this.isProcessing = false;
+    this._leftover = null;
 
     if (this.processor) {
       this.processor.disconnect();

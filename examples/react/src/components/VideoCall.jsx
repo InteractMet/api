@@ -83,7 +83,7 @@ export function VideoCall({ client, onDisconnect }) {
     client.sfu.on('transcription-received', handleTranscriptionReceived);
 
     return () => {
-      client.sfu.off('transcription-received', handleTranscriptionReceived);
+      client?.sfu?.off('transcription-received', handleTranscriptionReceived);
     };
   }, [client?.sfu]);
 
