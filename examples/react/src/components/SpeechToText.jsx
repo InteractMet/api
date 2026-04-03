@@ -2,30 +2,21 @@ import { useState, useEffect, useRef } from 'react';
 import { logger } from '../utils/logger';
 
 export function SpeechToText({ client }) {
-  const RATE = 0.66; // $ per minute
-
   // STT state
   const [finalTranscript, setFinalTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [sttError, setSttError] = useState(null);
-  const [sttSeconds, setSttSeconds] = useState(0);
   const recognitionRef = useRef(null);
 
   // TTS state
   const [ttsText, setTtsText] = useState('');
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [ttsError, setTtsError] = useState(null);
-  const [ttsChars, setTtsChars] = useState(0);
-
-  const sttCost = ((sttSeconds / 60) * RATE).toFixed(4);
-  const ttsCost = ((ttsChars / 750) * RATE).toFixed(4);
-  const totalCost = (parseFloat(sttCost) + parseFloat(ttsCost)).toFixed(4);
-  const mediaSourceRef = useRef(null);
-  const sourceBufferRef = useRef(null);
   const audioElRef = useRef(null);
   const chunkQueueRef = useRef([]);
-  const isAppendingRef = useRef(false);
+  const ttsDebounceRef = useRef(null);
+  const lastSynthesizedRef = useRef('');
 
   // Auto-start listening when component mounts
   useEffect(() => {
@@ -33,97 +24,89 @@ export function SpeechToText({ client }) {
     return () => stopListening();
   }, []);
 
-  // MP3 streaming player using MediaSource API
+  // OGG/Opus streaming player using MediaSource API
   useEffect(() => {
     if (!client?.socket) return;
 
-    const appendNext = () => {
-      if (
-        isAppendingRef.current ||
-        chunkQueueRef.current.length === 0 ||
-        !sourceBufferRef.current ||
-        sourceBufferRef.current.updating
-      ) return;
+    const MIME = 'audio/ogg; codecs="opus"';
+    const canStream = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(MIME) && false;
 
-      isAppendingRef.current = true;
-      const chunk = chunkQueueRef.current.shift();
-      try {
-        sourceBufferRef.current.appendBuffer(chunk);
-      } catch (e) {
-        isAppendingRef.current = false;
-        logger.error('appendBuffer error:', e);
+    const toUint8Array = (data) => {
+      if (data instanceof Uint8Array) return data;
+      if (data instanceof ArrayBuffer) return new Uint8Array(data);
+      if (data?.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data);
+      return new Uint8Array(Object.values(data));
+    };
+
+    // ── Streaming path (MediaSource) ──────────────────────────────────────────
+    let ms = null;
+    let sb = null;
+    const appendQueue = [];
+    let appending = false;
+    let endPending = false;
+
+    const tryFlush = () => {
+      if (appending || !sb || sb.updating) return;
+      if (appendQueue.length > 0) {
+        appending = true;
+        try { sb.appendBuffer(appendQueue.shift()); } catch (e) { appending = false; }
+        return;
+      }
+      if (endPending && ms?.readyState === 'open') {
+        try { ms.endOfStream(); } catch (_) {}
+        endPending = false;
       }
     };
 
-    const initMediaSource = () => {
-      const ms = new MediaSource();
+    const initMS = () => {
+      ms = new MediaSource();
       mediaSourceRef.current = ms;
-
       const audio = new Audio();
       audioElRef.current = audio;
       audio.src = URL.createObjectURL(ms);
-
       ms.addEventListener('sourceopen', () => {
-        const sb = ms.addSourceBuffer('audio/mpeg');
-        sourceBufferRef.current = sb;
-
-        sb.addEventListener('updateend', () => {
-          isAppendingRef.current = false;
-          appendNext();
-        });
-
+        sb = ms.addSourceBuffer(MIME);
+        sb.addEventListener('updateend', () => { appending = false; tryFlush(); });
         audio.play().catch((e) => logger.error('Audio play error:', e));
-        appendNext();
+        tryFlush();
       });
     };
 
-    const toArrayBuffer = (data) => {
-      if (data instanceof ArrayBuffer) return data;
-      if (data instanceof Uint8Array) return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-      if (data?.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data).buffer;
-      return new Uint8Array(Object.values(data)).buffer;
-    };
-
+    // ── Fallback path (collect → blob) ────────────────────────────────────────
     const handleChunk = (data) => {
-      try {
-        if (!mediaSourceRef.current) initMediaSource();
-        chunkQueueRef.current.push(toArrayBuffer(data));
-        appendNext();
-      } catch (err) {
-        logger.error('Failed to handle audio chunk:', err);
+      const chunk = toUint8Array(data);
+      if (canStream) {
+        if (!ms) initMS();
+        appendQueue.push(chunk);
+        tryFlush();
+      } else {
+        chunkQueueRef.current.push(chunk);
       }
-    };
-
-    const cleanup = () => {
-      chunkQueueRef.current = [];
-      isAppendingRef.current = false;
-      if (mediaSourceRef.current?.readyState === 'open') {
-        try { mediaSourceRef.current.endOfStream(); } catch (_) {}
-      }
-      if (audioElRef.current) {
-        URL.revokeObjectURL(audioElRef.current.src);
-        audioElRef.current = null;
-      }
-      mediaSourceRef.current = null;
-      sourceBufferRef.current = null;
     };
 
     const handleEnd = () => {
       setIsSynthesizing(false);
-      const endStream = () => {
-        if (sourceBufferRef.current?.updating) {
-          sourceBufferRef.current.addEventListener('updateend', endStream, { once: true });
-        } else if (mediaSourceRef.current?.readyState === 'open') {
-          try { mediaSourceRef.current.endOfStream(); } catch (_) {}
-        }
-      };
-      endStream();
+      if (canStream) {
+        endPending = true;
+        tryFlush();
+      } else {
+        if (chunkQueueRef.current.length === 0) return;
+        const blob = new Blob(chunkQueueRef.current, { type: 'audio/mpeg' });
+        chunkQueueRef.current = [];
+        if (audioElRef.current) { URL.revokeObjectURL(audioElRef.current.src); audioElRef.current.pause(); }
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audioElRef.current = audio;
+        audio.play().catch((e) => logger.error('Audio play error:', e));
+        audio.onended = () => URL.revokeObjectURL(url);
+      }
     };
 
     const handleError = ({ error }) => {
       setTtsError(error || 'Synthesis failed');
       setIsSynthesizing(false);
-      cleanup();
+      chunkQueueRef.current = [];
+      appendQueue.length = 0;
     };
 
     client.socket.on('speech-audio-chunk', handleChunk);
@@ -212,7 +195,6 @@ export function SpeechToText({ client }) {
             (response) => {
               if (response?.success && response.text) {
                 setFinalTranscript((prev) => (prev ? prev + ' ' + response.text : response.text));
-                setSttSeconds((prev) => prev + (CHUNK_INTERVAL_MS / 1000));
               }
             }
           );
@@ -253,25 +235,44 @@ export function SpeechToText({ client }) {
     }
   };
 
-  // TTS function
-  const synthesizeSpeech = () => {
-    if (!ttsText.trim()) return;
-    setIsSynthesizing(true);
-    setTtsError(null);
+  // Live TTS — synthesize only newly added text 800ms after user stops typing
+  useEffect(() => {
+    const newText = ttsText.trim();
 
-    client.socket.emit('synthesize-speech', {
-      text: ttsText.trim(),
-      voice: 'alloy',
-      model: 'tts-1',
-    }, (response) => {
-      if (response && !response.success) {
-        setTtsError(response.error || 'Synthesis failed');
-        setIsSynthesizing(false);
-      } else if (response?.success) {
-        setTtsChars((prev) => prev + (ttsText.trim().length));
-      }
-    });
-  };
+    if (!newText) {
+      lastSynthesizedRef.current = '';
+      return;
+    }
+
+    clearTimeout(ttsDebounceRef.current);
+    ttsDebounceRef.current = setTimeout(() => {
+      const last = lastSynthesizedRef.current;
+
+      // If user appended text, speak only the new portion; otherwise speak full text (edit/delete case)
+      const textToSpeak = newText.startsWith(last)
+        ? newText.slice(last.length).trim()
+        : newText;
+
+      if (!textToSpeak) return;
+
+      lastSynthesizedRef.current = newText;
+      setIsSynthesizing(true);
+      setTtsError(null);
+
+      client.socket.emit('synthesize-speech', {
+        text: textToSpeak,
+        voice: 'alloy',
+        model: 'tts-1',
+      }, (response) => {
+        if (response && !response.success) {
+          setTtsError(response.error || 'Synthesis failed');
+          setIsSynthesizing(false);
+        }
+      });
+    }, 800);
+
+    return () => clearTimeout(ttsDebounceRef.current);
+  }, [ttsText]);
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
@@ -329,83 +330,29 @@ export function SpeechToText({ client }) {
             </p>
           )}
         </div>
-        {finalTranscript && (
-          <div className="mt-2 text-sm text-gray-400 text-right">
-            {finalTranscript.trim().split(/\s+/).filter(w => w).length} words
-          </div>
-        )}
       </div>
-
-      {/* ── USAGE & COST ── */}
-      {(sttSeconds > 0 || ttsChars > 0) && (
-        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-          <h3 className="text-sm font-semibold text-gray-600 mb-3">Usage & Cost (@${RATE}/min)</h3>
-          <div className="grid grid-cols-3 gap-4 text-center">
-            <div>
-              <div className="text-xs text-gray-500 mb-1">STT</div>
-              <div className="text-sm font-medium text-gray-800">{(sttSeconds / 60).toFixed(2)} min</div>
-              <div className="text-sm font-semibold text-blue-600">${sttCost}</div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500 mb-1">TTS</div>
-              <div className="text-sm font-medium text-gray-800">{ttsChars} chars</div>
-              <div className="text-sm font-semibold text-purple-600">${ttsCost}</div>
-            </div>
-            <div className="border-l border-gray-200">
-              <div className="text-xs text-gray-500 mb-1">Total</div>
-              <div className="text-sm font-medium text-gray-800">&nbsp;</div>
-              <div className="text-base font-bold text-green-600">${totalCost}</div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── DIVIDER ── */}
       <hr className="border-gray-200" />
 
       {/* ── TEXT TO SPEECH ── */}
       <div>
-        <h2 className="text-2xl font-bold text-gray-800 mb-6">Text to Speech</h2>
+        <div className="flex items-center gap-3 mb-6">
+          <h2 className="text-2xl font-bold text-gray-800">Text to Speech</h2>
+          <span className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded-full font-medium">Speaks as you type</span>
+          {isSynthesizing && <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />}
+        </div>
 
         <div className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Enter text to synthesize</label>
-            <textarea
-              value={ttsText}
-              onChange={(e) => setTtsText(e.target.value)}
-              placeholder="Type something to convert to speech..."
-              rows={4}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800"
-            />
-            <div className="mt-1 text-sm text-gray-400 text-right">{ttsText.length} characters</div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={synthesizeSpeech}
-              disabled={isSynthesizing || !ttsText.trim()}
-              className="px-6 py-3 bg-purple-600 text-white font-medium rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {isSynthesizing ? 'Synthesizing...' : '🔊 Synthesize Speech'}
-            </button>
-            {ttsText && (
-              <button
-                onClick={() => setTtsText('')}
-                className="px-6 py-3 bg-gray-200 text-gray-800 font-medium rounded-lg hover:bg-gray-300 transition-colors"
-              >
-                Clear
-              </button>
-            )}
-          </div>
+          <textarea
+            value={ttsText}
+            onChange={(e) => setTtsText(e.target.value)}
+            placeholder="Start typing to hear it spoken..."
+            rows={4}
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent text-gray-800"
+          />
 
           {ttsError && <div className="px-4 py-3 bg-red-50 text-red-700 rounded-lg border border-red-200">{ttsError}</div>}
-
-          {isSynthesizing && (
-            <div className="p-4 bg-purple-50 border border-purple-200 rounded-lg flex items-center gap-3">
-              <span className="w-3 h-3 rounded-full bg-purple-500 animate-pulse flex-shrink-0"></span>
-              <span className="text-purple-700 font-medium">Streaming audio...</span>
-            </div>
-          )}
         </div>
       </div>
 

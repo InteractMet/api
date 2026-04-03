@@ -1,24 +1,80 @@
 import { useState } from 'react';
-import { logger } from '../utils/logger';
 
 const LANGUAGES = [
-  { code: 'en', label: 'English' },
-  { code: 'es', label: 'Spanish' },
-  { code: 'fr', label: 'French' },
-  { code: 'de', label: 'German' },
-  { code: 'it', label: 'Italian' },
-  { code: 'pt', label: 'Portuguese' },
-  { code: 'ar', label: 'Arabic' },
-  { code: 'zh', label: 'Chinese (Simplified)' },
-  { code: 'ja', label: 'Japanese' },
-  { code: 'ko', label: 'Korean' },
-  { code: 'ru', label: 'Russian' },
-  { code: 'tr', label: 'Turkish' },
-  { code: 'ur', label: 'Urdu' },
-  { code: 'hi', label: 'Hindi' },
+  { code: 'en',  label: 'English' },
+  { code: 'zh',  label: 'Chinese (Simplified)' },
+  { code: 'es',  label: 'Spanish' },
+  { code: 'fr',  label: 'French' },
+  { code: 'de',  label: 'German' },
+  { code: 'ar',  label: 'Arabic' },
+  { code: 'hi',  label: 'Hindi' },
+  { code: 'ur',  label: 'Urdu' },
+  { code: 'pt',  label: 'Portuguese' },
+  { code: 'ru',  label: 'Russian' },
+  { code: 'ja',  label: 'Japanese' },
+  { code: 'ko',  label: 'Korean' },
+  { code: 'it',  label: 'Italian' },
+  { code: 'tr',  label: 'Turkish' },
+  { code: 'nl',  label: 'Dutch' },
+  { code: 'pl',  label: 'Polish' },
+  { code: 'sv',  label: 'Swedish' },
+  { code: 'da',  label: 'Danish' },
+  { code: 'no',  label: 'Norwegian' },
+  { code: 'fi',  label: 'Finnish' },
+  { code: 'el',  label: 'Greek' },
+  { code: 'he',  label: 'Hebrew' },
+  { code: 'cs',  label: 'Czech' },
+  { code: 'sk',  label: 'Slovak' },
+  { code: 'hu',  label: 'Hungarian' },
+  { code: 'ro',  label: 'Romanian' },
+  { code: 'bg',  label: 'Bulgarian' },
+  { code: 'hr',  label: 'Croatian' },
+  { code: 'sl',  label: 'Slovenian' },
+  { code: 'et',  label: 'Estonian' },
+  { code: 'lv',  label: 'Latvian' },
+  { code: 'lt',  label: 'Lithuanian' },
+  { code: 'uk',  label: 'Ukrainian' },
+  { code: 'sr',  label: 'Serbian' },
+  { code: 'id',  label: 'Indonesian' },
+  { code: 'ms',  label: 'Malay' },
+  { code: 'tl',  label: 'Filipino' },
+  { code: 'th',  label: 'Thai' },
+  { code: 'vi',  label: 'Vietnamese' },
+  { code: 'bn',  label: 'Bengali' },
+  { code: 'gu',  label: 'Gujarati' },
+  { code: 'ta',  label: 'Tamil' },
+  { code: 'te',  label: 'Telugu' },
+  { code: 'kn',  label: 'Kannada' },
+  { code: 'ml',  label: 'Malayalam' },
+  { code: 'mr',  label: 'Marathi' },
+  { code: 'pa',  label: 'Punjabi' },
+  { code: 'ne',  label: 'Nepali' },
+  { code: 'si',  label: 'Sinhala' },
+  { code: 'fa',  label: 'Persian' },
+  { code: 'ka',  label: 'Georgian' },
+  { code: 'hy',  label: 'Armenian' },
+  { code: 'az',  label: 'Azerbaijani' },
+  { code: 'kk',  label: 'Kazakh' },
+  { code: 'uz',  label: 'Uzbek' },
+  { code: 'mn',  label: 'Mongolian' },
+  { code: 'sw',  label: 'Swahili' },
+  { code: 'af',  label: 'Afrikaans' },
+  { code: 'am',  label: 'Amharic' },
+  { code: 'ha',  label: 'Hausa' },
+  { code: 'yo',  label: 'Yoruba' },
+  { code: 'ca',  label: 'Catalan' },
+  { code: 'eu',  label: 'Basque' },
+  { code: 'gl',  label: 'Galician' },
+  { code: 'cy',  label: 'Welsh' },
+  { code: 'ga',  label: 'Irish' },
+  { code: 'is',  label: 'Icelandic' },
+  { code: 'mk',  label: 'Macedonian' },
+  { code: 'sq',  label: 'Albanian' },
+  { code: 'be',  label: 'Belarusian' },
+  { code: 'my',  label: 'Burmese' },
+  { code: 'km',  label: 'Khmer' },
+  { code: 'lo',  label: 'Lao' },
 ];
-
-const TRANSLATION_RATE = 0.008; // $ per character
 
 export function Translation({ client }) {
   const [sourceText, setSourceText] = useState('');
@@ -28,8 +84,6 @@ export function Translation({ client }) {
   const [isTranslating, setIsTranslating] = useState(false);
   const [error, setError] = useState(null);
   const [detectedLang, setDetectedLang] = useState(null);
-  const [totalChars, setTotalChars] = useState(0);
-  const [totalCost, setTotalCost] = useState(0);
 
   const translate = () => {
     if (!sourceText.trim()) return;
@@ -47,10 +101,6 @@ export function Translation({ client }) {
       if (response.success) {
         setTranslatedText(response.translatedText);
         if (response.detectedSourceLanguage) setDetectedLang(response.detectedSourceLanguage);
-        if (response.charCount) {
-          setTotalChars((prev) => prev + response.charCount);
-          setTotalCost((prev) => prev + response.cost);
-        }
       } else {
         setError(response.error || 'Translation failed');
       }
@@ -121,10 +171,11 @@ export function Translation({ client }) {
             rows={8}
             className="w-full resize-none focus:outline-none text-gray-800 placeholder-gray-400"
           />
-          <div className="flex justify-between items-center mt-2 text-sm text-gray-400">
-            {detectedLang && <span>Detected: {LANGUAGES.find(l => l.code === detectedLang)?.label || detectedLang}</span>}
-            <span className="ml-auto">{sourceText.length} chars</span>
-          </div>
+          {detectedLang && (
+            <div className="mt-2 text-sm text-gray-400">
+              Detected: {LANGUAGES.find(l => l.code === detectedLang)?.label || detectedLang}
+            </div>
+          )}
         </div>
 
         <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
@@ -168,16 +219,6 @@ export function Translation({ client }) {
         <span className="ml-auto text-sm text-gray-400 self-center">Ctrl+Enter to translate</span>
       </div>
 
-      {totalChars > 0 && (
-        <div className="mt-4 bg-gray-50 border border-gray-200 rounded-lg p-4 flex items-center justify-between">
-          <span className="text-sm text-gray-500">
-            Usage: <span className="font-medium text-gray-700">{totalChars} chars</span>
-            <span className="mx-2 text-gray-300">·</span>
-            @${TRANSLATION_RATE}/char
-          </span>
-          <span className="text-base font-bold text-green-600">${totalCost.toFixed(4)}</span>
-        </div>
-      )}
     </div>
   );
 }
