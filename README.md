@@ -1,14 +1,12 @@
-# Webvox API — Simple Guide
+# Webvox API
 
-Think of **webvox** as a magic telephone switchboard. Your app talks to webvox, and webvox talks to all the other services (video calls, speech, voice, translation) for you. You only need to know how to talk to webvox.
+**Webvox** is a unified gateway for real-time communication. Your app connects to webvox via Socket.IO and gets access to video/audio calls, speech-to-text, text-to-speech, and translation — all through a single connection.
 
 ---
 
-## Before Anything — Get Your Key
+## Get Your API Key
 
-Every request needs an **API key**. Think of it like a password badge that lets you through the door.
-
-You get this key from the admin panel. It looks like:
+Every connection requires an API key. Get one from your admin panel. It looks like:
 
 ```
 wvx_live_abc123...
@@ -16,15 +14,11 @@ wvx_live_abc123...
 
 ---
 
-## Step 1 — Connect
-
-Install socket.io if you haven't:
+## Connect
 
 ```bash
 npm install socket.io-client
 ```
-
-Then connect:
 
 ```js
 import { io } from 'socket.io-client'
@@ -33,124 +27,114 @@ const socket = io('https://webvox.interactmet.ca', {
   auth: { apiKey: 'YOUR_API_KEY_HERE' }
 })
 
-socket.on('connect', () => {
-  console.log('Connected!')
-})
-
-socket.on('connect_error', (err) => {
-  console.log('Could not connect:', err.message)
-})
+socket.on('connect', () => console.log('Connected'))
+socket.on('connect_error', (err) => console.log('Failed:', err.message))
 ```
-
-That's it. You're in. Now you can use any feature below.
 
 ---
 
 ## Feature 1 — Video & Audio Calls
 
-### Join a room
-
 ```js
-// First, connect to the video system
+// Connect to video system
 socket.emit('connect-sfu', (res) => {
   if (res.success) {
-    // Now join a room
+    // Join a room
     socket.emit('join-room', { roomId: 'my-room-123' })
   }
 })
-```
 
-### Leave a room
-
-```js
+// Leave
 socket.emit('leave-room')
 ```
 
-> **What is SFU?** It's the thing that handles video and audio between multiple people in a call. You don't need to understand it — just call `connect-sfu` first, then `join-room`.
-
 ---
 
-## Feature 2 — Speech to Text (Google, streaming)
+## Feature 2 — Speech to Text (streaming)
 
-Turn someone's voice into text, word by word, as they speak.
+Real-time transcription as the user speaks.
 
 ```js
-// Step 1: Connect to speech service
+// Connect to STT service
 socket.emit('connect-stt', (res) => {
   if (res.success) {
 
-    // Step 2: Start listening
+    // Start
     socket.emit('start-transcription', {
-      language: 'en-US',  // what language they're speaking
+      language: 'en-US',
       model: 'chirp'
     })
 
-    // Step 3: Send audio chunks (you get these from the microphone)
+    // Send audio chunks from microphone
     socket.emit('audio-data', { data: base64AudioChunk })
 
-    // Step 4: Stop when done
+    // Stop
     socket.emit('stop-transcription')
   }
 })
 
-// Step 5: Receive the words
+// Receive transcript
 socket.on('transcript', ({ text, isFinal }) => {
-  if (isFinal) {
-    console.log('They said:', text)
-  }
+  if (isFinal) console.log('Transcript:', text)
 })
 ```
 
 ---
 
-## Feature 3 — Speech to Text (Whisper, one chunk at a time)
+## Feature 3 — Speech to Text (Whisper, single recording)
 
-Good for short recordings. Send a recorded audio file, get the text back.
+Send a recorded audio file, get the text back.
 
 ```js
 socket.emit('whisper-transcribe', {
-  audio: audioBuffer,      // your recorded audio (Buffer or ArrayBuffer)
-  language: 'en',          // optional, auto-detects if not set
-  chunkSeconds: 5          // how many seconds of audio this is
+  audio: audioBuffer,   // Buffer or ArrayBuffer
+  language: 'en',       // optional — auto-detects if not set
+  chunkSeconds: 5
 }, (res) => {
-  if (res.success) {
-    console.log('They said:', res.text)
-  } else {
-    console.log('Error:', res.error)
-  }
+  if (res.success) console.log('Transcript:', res.text)
+  else console.log('Error:', res.error)
 })
 ```
 
 ---
 
-## Feature 4 — Text to Speech (make the computer talk)
+## Feature 4 — Text to Speech
 
-Give it text, it gives you back audio that you can play.
+Powered by **Google Cloud Chirp3-HD**. Supports **46 languages**.
 
-### Option A — Streaming (audio comes back piece by piece, starts playing faster)
+Pass a `language` code to get the correct voice for that language. If omitted, defaults to English.
 
 ```js
 socket.emit('synthesize-speech', {
-  text: 'Hello! How are you today?',
-  voice: 'alloy',    // see voices list below
-  model: 'tts-1',
-  speed: 1.0         // 0.25 (slow) to 4.0 (fast)
+  text: 'Hello, how are you?',
+  language: 'en',   // language code — determines the voice used
+  speed: 1.0        // optional, 0.25–4.0
 }, (ack) => {
-  // ack tells you the request was received
+  // ack confirms the request was received
 })
 
-// Audio arrives in chunks — collect them
+// Collect audio chunks
 const chunks = []
 
-socket.on('speech-audio-chunk', (chunk) => {
-  chunks.push(chunk)
+socket.on('speech-audio-chunk', async (chunk) => {
+  // In production browsers, chunk may arrive as a Blob
+  if (chunk instanceof Blob) {
+    chunks.push(new Uint8Array(await chunk.arrayBuffer()))
+  } else if (chunk instanceof ArrayBuffer) {
+    chunks.push(new Uint8Array(chunk))
+  } else if (chunk?.type === 'Buffer') {
+    chunks.push(new Uint8Array(chunk.data))
+  } else {
+    chunks.push(chunk)
+  }
 })
 
 socket.on('speech-audio-end', () => {
-  // All done — play the audio
   const blob = new Blob(chunks, { type: 'audio/mpeg' })
   const url = URL.createObjectURL(blob)
-  new Audio(url).play()
+  const audio = new Audio(url)
+  audio.play()
+  audio.onended = () => URL.revokeObjectURL(url)
 })
 
 socket.on('speech-audio-error', ({ error }) => {
@@ -158,147 +142,111 @@ socket.on('speech-audio-error', ({ error }) => {
 })
 ```
 
-### Option B — HTTP (simpler, whole file at once)
+### Supported TTS Languages
+
+| Code | Language | Code | Language |
+|------|----------|------|----------|
+| `en` | English | `ar` | Arabic |
+| `fr` | French | `de` | German |
+| `es` | Spanish | `hi` | Hindi |
+| `ur` | Urdu | `it` | Italian |
+| `ja` | Japanese | `ko` | Korean |
+| `pt` | Portuguese | `ru` | Russian |
+| `zh` | Chinese | `nl` | Dutch |
+| `pl` | Polish | `sv` | Swedish |
+| `uk` | Ukrainian | `id` | Indonesian |
+| `vi` | Vietnamese | `th` | Thai |
+| `bn` | Bengali | `bg` | Bulgarian |
+| `hr` | Croatian | `cs` | Czech |
+| `da` | Danish | `et` | Estonian |
+| `fi` | Finnish | `el` | Greek |
+| `gu` | Gujarati | `he` | Hebrew |
+| `hu` | Hungarian | `kn` | Kannada |
+| `lv` | Latvian | `lt` | Lithuanian |
+| `ml` | Malayalam | `mr` | Marathi |
+| `nb` | Norwegian | `pa` | Punjabi |
+| `ro` | Romanian | `sr` | Serbian |
+| `sk` | Slovak | `sl` | Slovenian |
+| `sw` | Swahili | `ta` | Tamil |
+| `te` | Telugu | `tr` | Turkish |
+
+You can also fetch the full list at runtime:
 
 ```js
-const response = await fetch('https://webvox.interactmet.ca/api/tts/speak', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'x-api-key': 'YOUR_API_KEY_HERE'
-  },
-  body: JSON.stringify({
-    text: 'Hello! How are you today?',
-    voice: 'alloy',
-    model: 'tts-1'
-  })
+// Via socket
+socket.emit('get-tts-voices', (res) => {
+  console.log(res.voices) // [{ id: 'en', name: 'English (Chirp3-HD)' }, ...]
 })
 
-const blob = await response.blob()
-const url = URL.createObjectURL(blob)
-new Audio(url).play()
+// Via REST
+const res = await fetch('https://webvox.interactmet.ca/api/tts/voices', {
+  headers: { 'x-api-key': 'YOUR_API_KEY_HERE' }
+})
+const { voices } = await res.json()
 ```
-
-### Available Voices
-
-| Voice | Sounds like |
-|-------|-------------|
-| `alloy` | Neutral, balanced |
-| `echo` | Warm |
-| `fable` | Storyteller |
-| `onyx` | Deep, serious |
-| `nova` | Energetic |
-| `shimmer` | Soft, gentle |
-
-### Available Models
-
-| Model | When to use |
-|-------|-------------|
-| `tts-1` | Faster, cheaper — good for most cases |
-| `tts-1-hd` | Slower, better quality |
 
 ---
 
 ## Feature 5 — Translation
 
-Translate text from one language to another.
+Powered by **OpenAI GPT-4o-mini**. Supports **91 languages**.
 
 ```js
 socket.emit('translate', {
   text: 'Hello, how are you?',
-  targetLanguage: 'es',       // language to translate TO
-  sourceLanguage: 'en'        // language to translate FROM (optional — auto-detects)
+  targetLanguage: 'es',    // language to translate TO
+  sourceLanguage: 'en'     // language to translate FROM (optional — auto-detects)
 }, (res) => {
   if (res.success) {
-    console.log('Translated:', res.translatedText)  // "Hola, ¿cómo estás?"
-    console.log('Characters used:', res.charCount)
+    console.log('Translated:', res.translatedText)       // "Hola, ¿cómo estás?"
+    console.log('Detected source:', res.detectedSourceLanguage) // 'en'
+  } else {
+    console.log('Error:', res.error)
   }
 })
 ```
 
-**Response fields:**
+**Response:**
 
 ```js
 {
   success: true,
   translatedText: 'Hola, ¿cómo estás?',
-  detectedSourceLanguage: 'en',
-  charCount: 20,
-  cost: 0.16    // in USD cents, roughly
+  detectedSourceLanguage: 'en'
 }
 ```
 
----
-
-## Full React Example
-
-Here's a small React component that connects and translates text:
-
-```jsx
-import { useEffect, useState } from 'react'
-import { io } from 'socket.io-client'
-
-const socket = io('https://webvox.interactmet.ca', {
-  auth: { apiKey: 'YOUR_API_KEY_HERE' }
-})
-
-export default function Translator() {
-  const [connected, setConnected] = useState(false)
-  const [result, setResult] = useState('')
-
-  useEffect(() => {
-    socket.on('connect', () => setConnected(true))
-    socket.on('disconnect', () => setConnected(false))
-    return () => socket.disconnect()
-  }, [])
-
-  function translate() {
-    socket.emit('translate', {
-      text: 'Hello world',
-      targetLanguage: 'es'
-    }, (res) => {
-      if (res.success) setResult(res.translatedText)
-    })
-  }
-
-  return (
-    <div>
-      <p>Status: {connected ? 'Connected' : 'Not connected'}</p>
-      <button onClick={translate}>Translate "Hello world" to Spanish</button>
-      {result && <p>Result: {result}</p>}
-    </div>
-  )
-}
-```
+If `sourceLanguage` is omitted or `'auto'`, the source language is auto-detected from the text's script/content.
 
 ---
 
 ## Quick Reference
 
-| What you want to do | What to call |
+| What you want | Event / Endpoint |
 |---|---|
-| Join a video/audio call | `connect-sfu` → `join-room` |
+| Connect to video calls | `connect-sfu` → `join-room` |
+| Leave a video call | `leave-room` |
 | Start live transcription | `connect-stt` → `start-transcription` |
+| Send audio for transcription | `audio-data` |
+| Stop transcription | `stop-transcription` |
 | Transcribe a recording | `whisper-transcribe` |
-| Make the computer speak (socket) | `synthesize-speech` |
-| Make the computer speak (HTTP) | `POST /api/tts/speak` |
+| Text to speech | `synthesize-speech` |
+| Get available TTS languages | `get-tts-voices` or `GET /api/tts/voices` |
 | Translate text | `translate` |
-| Get available voices | `get-tts-voices` |
-| Get available TTS models | `get-tts-models` |
-| Check server is alive | `GET /health` |
+| Health check | `GET /health` |
 
 ---
 
-## Common Mistakes
+## Common Errors
 
 **"Authentication failed"**
-→ You forgot to pass `auth: { apiKey: '...' }` when connecting.
-
-**"Origin not allowed"**
-→ Your website's address isn't in the allowed list for your API key. Ask the admin to add it.
+Your API key is missing or wrong. Pass `auth: { apiKey: '...' }` when connecting. Make sure the key exists in the system.
 
 **"Service not available"**
-→ That feature isn't set up on the server yet (missing API key on the server side).
+The server is missing a required configuration (e.g. the application API URL is not set). Contact your admin.
 
 **Audio doesn't play**
-→ Browsers block audio that wasn't triggered by a user click. Make sure `new Audio().play()` runs inside a button click handler.
+Browsers block audio that wasn't triggered by a user interaction. Call `audio.play()` inside a button click handler, or use a user gesture to unlock audio first.
+
+**Translation returns HTML instead of JSON**
+The application server URL is misconfigured on the webvox server. Admin needs to check `APP_API_URL` in the webvox environment.

@@ -31,9 +31,10 @@ export function SpeechToText({ client }) {
     const MIME = 'audio/ogg; codecs="opus"';
     const canStream = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(MIME) && false;
 
-    const toUint8Array = (data) => {
+    const toUint8Array = async (data) => {
       if (data instanceof Uint8Array) return data;
       if (data instanceof ArrayBuffer) return new Uint8Array(data);
+      if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
       if (data?.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data);
       return new Uint8Array(Object.values(data));
     };
@@ -73,8 +74,8 @@ export function SpeechToText({ client }) {
     };
 
     // ── Fallback path (collect → blob) ────────────────────────────────────────
-    const handleChunk = (data) => {
-      const chunk = toUint8Array(data);
+    const handleChunk = async (data) => {
+      const chunk = await toUint8Array(data);
       if (canStream) {
         if (!ms) initMS();
         appendQueue.push(chunk);

@@ -19,6 +19,10 @@ export function VideoCall({ client, onDisconnect }) {
   const [receivedMessages, setReceivedMessages] = useState([]);
   const [language, setLanguage] = useState('en');
 
+  // TTS audio refs
+  const audioElRef = useRef(null);
+  const chunkQueueRef = useRef([]);
+
   // Custom hooks
   const {
     device,
@@ -57,11 +61,55 @@ export function VideoCall({ client, onDisconnect }) {
     (producerId) => removeProducer(producerId, consumers.current)
   );
 
+  // TTS audio chunk collection
+  useEffect(() => {
+    if (!client?.socket) return;
+
+    const toUint8Array = async (data) => {
+      if (data instanceof Uint8Array) return data;
+      if (data instanceof ArrayBuffer) return new Uint8Array(data);
+      if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
+      if (data?.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data);
+      return new Uint8Array(Object.values(data));
+    };
+
+    const handleChunk = async (data) => {
+      chunkQueueRef.current.push(await toUint8Array(data));
+    };
+
+    const handleEnd = () => {
+      if (chunkQueueRef.current.length === 0) return;
+      const blob = new Blob(chunkQueueRef.current, { type: 'audio/mpeg' });
+      chunkQueueRef.current = [];
+      if (audioElRef.current) { URL.revokeObjectURL(audioElRef.current.src); audioElRef.current.pause(); }
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioElRef.current = audio;
+      audio.play().catch((e) => logger.error('Audio play error:', e));
+      audio.onended = () => URL.revokeObjectURL(url);
+    };
+
+    const handleError = ({ error }) => {
+      logger.error('TTS error:', error);
+      chunkQueueRef.current = [];
+    };
+
+    client.socket.on('speech-audio-chunk', handleChunk);
+    client.socket.on('speech-audio-end', handleEnd);
+    client.socket.on('speech-audio-error', handleError);
+
+    return () => {
+      client.socket.off('speech-audio-chunk', handleChunk);
+      client.socket.off('speech-audio-end', handleEnd);
+      client.socket.off('speech-audio-error', handleError);
+    };
+  }, [client?.socket]);
+
   // Handle received messages from other participants
   useEffect(() => {
     if (!client?.sfu) return;
 
-    const handleTranscriptionReceived = async (data) => {
+    const handleTranscriptionReceived = (data) => {
       logger.info('Message received from participant:', data);
 
       const newMessage = {
@@ -73,11 +121,7 @@ export function VideoCall({ client, onDisconnect }) {
       setReceivedMessages(prev => [...prev, newMessage]);
 
       // Play text-to-speech for received message
-      try {
-        await playTextToSpeech(data.text);
-      } catch (err) {
-        logger.error('Failed to play TTS:', err);
-      }
+      playTextToSpeech(data.text);
     };
 
     client.sfu.on('transcription-received', handleTranscriptionReceived);
@@ -87,38 +131,18 @@ export function VideoCall({ client, onDisconnect }) {
     };
   }, [client?.sfu]);
 
-  const playTextToSpeech = async (text) => {
-    try {
-      const response = await fetch(`${client.config.serverUrl}/api/tts/synthesize`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': client.config.apiKey
-        },
-        body: JSON.stringify({
-          text: text,
-          voice: 'nova'
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('TTS request failed');
+  const playTextToSpeech = (text) => {
+    if (!text?.trim() || !client?.socket) return;
+    chunkQueueRef.current = [];
+    client.socket.emit('synthesize-speech', {
+      text: text.trim(),
+      voice: 'alloy',
+      model: 'tts-1',
+    }, (response) => {
+      if (response && !response.success) {
+        logger.error('TTS synthesis failed:', response.error);
       }
-
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl);
-      };
-
-      await audio.play();
-      logger.info('Playing TTS audio for received message');
-    } catch (err) {
-      logger.error('TTS synthesis failed:', err);
-      throw err;
-    }
+    });
   };
 
   // Cleanup on unmount
