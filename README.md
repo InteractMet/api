@@ -104,33 +104,35 @@ Powered by **Google Cloud Chirp3-HD**. Supports **46 languages**.
 
 Pass a `language` code to get the correct voice for that language. If omitted, defaults to English.
 
+The server synthesizes the complete MP3 audio and delivers it as a **single `speech-audio-chunk` binary event**, followed by `speech-audio-end`. Collect the chunk(s), assemble them into a blob, and play.
+
 ```js
 socket.emit('synthesize-speech', {
   text: 'Hello, how are you?',
   language: 'en',   // language code — determines the voice used
   speed: 1.0        // optional, 0.25–4.0
 }, (ack) => {
-  // ack confirms the request was received
+  if (ack && !ack.success) console.log('TTS error:', ack.error)
 })
 
-// Collect audio chunks
+// Collect chunks (arrives as a single complete MP3 buffer)
 const chunks = []
 
-socket.on('speech-audio-chunk', async (chunk) => {
-  // In production browsers, chunk may arrive as a Blob
-  if (chunk instanceof Blob) {
-    chunks.push(new Uint8Array(await chunk.arrayBuffer()))
-  } else if (chunk instanceof ArrayBuffer) {
+socket.on('speech-audio-chunk', (chunk) => {
+  if (chunk instanceof ArrayBuffer) {
     chunks.push(new Uint8Array(chunk))
-  } else if (chunk?.type === 'Buffer') {
+  } else if (chunk?.type === 'Buffer' && Array.isArray(chunk.data)) {
     chunks.push(new Uint8Array(chunk.data))
-  } else {
+  } else if (chunk instanceof Uint8Array) {
     chunks.push(chunk)
   }
 })
 
 socket.on('speech-audio-end', () => {
+  if (chunks.length === 0) return
   const blob = new Blob(chunks, { type: 'audio/mpeg' })
+  chunks.length = 0
+  if (blob.size === 0) return
   const url = URL.createObjectURL(blob)
   const audio = new Audio(url)
   audio.play()
@@ -139,6 +141,7 @@ socket.on('speech-audio-end', () => {
 
 socket.on('speech-audio-error', ({ error }) => {
   console.log('TTS failed:', error)
+  chunks.length = 0
 })
 ```
 
@@ -245,8 +248,8 @@ Your API key is missing or wrong. Pass `auth: { apiKey: '...' }` when connecting
 **"Service not available"**
 The server is missing a required configuration (e.g. the application API URL is not set). Contact your admin.
 
-**Audio doesn't play**
-Browsers block audio that wasn't triggered by a user interaction. Call `audio.play()` inside a button click handler, or use a user gesture to unlock audio first.
+**Audio doesn't play / NotSupportedError**
+Make sure you are handling `speech-audio-chunk` synchronously (no `async/await` inside the handler). If the handler is async, `speech-audio-end` can fire before the chunks are pushed into the array, producing an empty or incomplete blob. Also ensure `audio.play()` is called inside a user-gesture handler — browsers block autoplay for audio that was never triggered by an interaction.
 
 **Translation returns HTML instead of JSON**
 The application server URL is misconfigured on the webvox server. Admin needs to check `APP_API_URL` in the webvox environment.
