@@ -31,10 +31,9 @@ export function SpeechToText({ client }) {
     const MIME = 'audio/ogg; codecs="opus"';
     const canStream = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(MIME) && false;
 
-    const toUint8Array = async (data) => {
+    const toUint8Array = (data) => {
       if (data instanceof Uint8Array) return data;
       if (data instanceof ArrayBuffer) return new Uint8Array(data);
-      if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
       if (data?.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data);
       return new Uint8Array(Object.values(data));
     };
@@ -74,8 +73,8 @@ export function SpeechToText({ client }) {
     };
 
     // ── Fallback path (collect → blob) ────────────────────────────────────────
-    const handleChunk = async (data) => {
-      const chunk = await toUint8Array(data);
+    const handleChunk = (data) => {
+      const chunk = toUint8Array(data);
       if (canStream) {
         if (!ms) initMS();
         appendQueue.push(chunk);
@@ -94,6 +93,7 @@ export function SpeechToText({ client }) {
         if (chunkQueueRef.current.length === 0) return;
         const blob = new Blob(chunkQueueRef.current, { type: 'audio/mpeg' });
         chunkQueueRef.current = [];
+        if (blob.size === 0) return;
         if (audioElRef.current) { URL.revokeObjectURL(audioElRef.current.src); audioElRef.current.pause(); }
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);

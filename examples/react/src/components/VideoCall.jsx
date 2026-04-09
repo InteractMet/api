@@ -65,22 +65,22 @@ export function VideoCall({ client, onDisconnect }) {
   useEffect(() => {
     if (!client?.socket) return;
 
-    const toUint8Array = async (data) => {
+    const toUint8Array = (data) => {
       if (data instanceof Uint8Array) return data;
       if (data instanceof ArrayBuffer) return new Uint8Array(data);
-      if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
       if (data?.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data);
       return new Uint8Array(Object.values(data));
     };
 
-    const handleChunk = async (data) => {
-      chunkQueueRef.current.push(await toUint8Array(data));
+    const handleChunk = (data) => {
+      chunkQueueRef.current.push(toUint8Array(data));
     };
 
     const handleEnd = () => {
       if (chunkQueueRef.current.length === 0) return;
       const blob = new Blob(chunkQueueRef.current, { type: 'audio/mpeg' });
       chunkQueueRef.current = [];
+      if (blob.size === 0) return;
       if (audioElRef.current) { URL.revokeObjectURL(audioElRef.current.src); audioElRef.current.pause(); }
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
